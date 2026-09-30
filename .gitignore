@@ -179,3 +179,23 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# Excel files, anywhere in the repo
+*.xlsx
+*.xls
+*.xlsm
+~$*.xlsx
+*.md
+!README.md
+
+# Folders (trailing slash = folder)
+__pycache__/
+withu/checkpoints/
+withu/.ipynb_checkpoints/
+withu/excel/
+outputs/
+data/
+
+# Secrets
+.withu_secrets
+.env
