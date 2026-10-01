@@ -1,20 +1,23 @@
-# 위드유톡 AI 추론 서버 API 문서 v0.3.0
+# 위드유톡 AI 추론 서버 API 문서 v0.3.1
 
-Sep 30, 2026 
+Oct 1, 2026 
+
+https://hepatitis-instead-egg-consequently.trycloudflare.com
 
 ## 1. 개요
 
-위드유톡 AI 추론 서버는 대화방 메시지를 받아 사이버불링 여부와 가해자·피해자를 판정합니다. 사건이 열려 있는 동안에는 주변인의 방어·동조·방관 행동을 추적해, 앱이 아이에게 보여 줄 알림을 돌려줍니다. v0.3.0은 v0.2.0에 방관행동 판정부(`/bystander/*`)를 더한 버전입니다.
+위드유톡 AI 추론 서버는 대화방 메시지를 받아 사이버불링 여부와 가해자·피해자를 판정합니다. 사건이 열려 있는 동안에는 주변인의 방어·동조·방관 행동을 추적해, 앱이 아이에게 보여 줄 알림을 돌려줍니다. v0.3.0은 v0.2.0에 방관행동 판정부(`/bystander/*`)를 더한 버전이고, v0.3.1은 피해자 식별을 보강했습니다 (§9).
 
 | 항목 | 값 |
 | --- | --- |
 | 기본 주소 | 현재 `https://marcus-bay-system-protective.trycloudflare.com` (임시 터널) |
 | 형식 | JSON, UTF-8 (`Content-Type: application/json; charset=utf-8`) |
-| 서버 버전 | 0.3.0 |
+| 서버 버전 | 0.3.1 |
 
 **개인정보 원칙**
 
-- 모든 식별자는 가명 `participant_code`(예: `P05`)만 보냅니다. 실명, 전화번호, 학교명은 보내지 않습니다.
+- 모든 식별자는 가명 `participant_code`(예: `P05`)로 보냅니다. 전화번호, 학교명은 보내지 않습니다.
+- `participants[].display_name`은 앱 화면에 보이는 이름입니다. 서버는 공격 메시지에서 이름을 찾는 데만 메모리로 쓰고 저장하지 않습니다.
 - 1:1 대화 내용은 보내지 않습니다. 방어 기능을 사용했다는 사실만 이벤트로 보냅니다.
 - `/bystander/state`의 판정 결과(방관 등)는 아동에게 보여 주지 않습니다.
 
@@ -50,6 +53,7 @@ Sep 30, 2026
 | `room_id` | string | 예 | 대화방 ID |
 | `new_message` | Message | 예 | 판정할 메시지 (아래 Message 표) |
 | `context` | Message\[\] | 아니오 | 직전 대화, 오래된 것부터. 기본 `[]` |
+| `participants` | Participant\[\] | 권장 | 대화방 구성원 명단. 피해자 이름 지목에 씁니다. 서버가 방별로 기억하므로 입장·변경 때만 보내도 되지만, 매번 보내도 됩니다 |
 | `track_bystander` | boolean | 아니오 | 기본 `true`. 전송 전 호출은 `false`, 전송 후 호출은 `true`. 메시지마다 `true` 호출은 한 번만 |
 | `has_image` | boolean | 아니오 | 이미지 포함 여부. 기본 `false` |
 | `left_chat` | boolean | 아니오 | 발신자가 대화방을 나갔는지. 기본 `false` |
@@ -66,10 +70,24 @@ Sep 30, 2026
 | `is_defense_action` | boolean | 아니오 | 챗봇 방어행동 선택지로 보낸 메시지면 `true`. 기본 `false` |
 | `read_by_count` | integer | 아니오 | 이 메시지를 읽은 인원 |
 | `response_latency_sec` | number | 아니오 | 이 발신자가 응답하기까지 걸린 초 |
+| `reply_to_message_id` | string | 아니오 | 답장 기능으로 보낸 메시지면 원래 메시지의 `message_id`. 공격 메시지가 답장이면 원래 발신자를 피해자로 지목합니다 |
+
+**Participant**
+
+| 필드 | 타입 | 필수 | 설명 |
+| --- | --- | --- | --- |
+| `participant_code` | string | 예 | 가명 코드 |
+| `display_name` | string | 권장 | 앱 화면 이름. `김하늘`이면 `하늘아`, `하늘이가`도 찾습니다 |
+| `aliases` | string\[\] | 아니오 | 아이들이 실제로 부르는 다른 이름(별명 등) |
 
 ```json
 {
   "room_id": "room_001",
+  "participants": [
+    { "participant_code": "P11", "display_name": "내가최고다" },
+    { "participant_code": "P03", "display_name": "하늘" },
+    { "participant_code": "P05", "display_name": "별이" }
+  ],
   "context": [
     { "participant_code": "P11", "text": "하늘 너 진짜 냄새나 꺼져", "message_id": "m1", "timestamp": "2026-10-05T14:21:40+09:00" },
     { "participant_code": "P03", "text": "왜 그래...", "message_id": "m2", "timestamp": "2026-10-05T14:21:52+09:00" }
@@ -86,7 +104,7 @@ Sep 30, 2026
 | `attribution.is_bullying` | **개입 기준.** 사건 게이트를 통과한 사이버불링이면 `true` |
 | `attribution.aggressors` | 가해자 코드 목록. `is_bullying=true`일 때만 신뢰 |
 | `attribution.victim` | 피해자 코드. `is_bullying=true`일 때만 신뢰 |
-| `attribution.victim_reason` | 피해자를 찾은 근거 (예: `name_mention`) |
+| `attribution.victim_reason` | 피해자를 찾은 근거: `explicit_target`(답장), `name_mention`(이름), `repeated_target`(반복 공격에 같은 아이가 반응), `distress_signal`, `turn_adjacency` |
 | `attribution.confidence` | 역할 판정 신뢰도 0\~1 |
 | `attribution.drop_reason` | `is_bullying=false`인 이유 (예: `weak_target`). 디버그용 |
 | `cb_score` | 메시지 단위 사이버불링 점수 0\~1 (가드 적용 후). 전송 전 경고에만 사용 |
@@ -128,6 +146,18 @@ Sep 30, 2026
 - **전송 후 개입** (`track_bystander: true`): `attribution.is_bullying`이 `true`일 때만 가해자·피해자 기반 기능을 켭니다. `false`일 때의 `aggressors`, `victim`은 잠정값입니다.
 - `cb_score` 하나로 개입하지 마세요. 평범한 대화도 0.5 안팎이 나올 수 있습니다 (§10).
 - 챗봇 선택지로 보낸 위로 메시지는 `is_defense_action: true`로 보내세요. 이 표시가 없으면 가드가 덜 확실하게 작동합니다.
+
+### 사건이 열리는 조건
+
+공격 메시지가 있고, 피해자가 다음 중 하나로 특정되어야 합니다. 서버는 방마다 최근 60개·20분 메시지를 기억해서 `context`보다 긴 흐름을 봅니다.
+
+| 근거 | 조건 |
+| --- | --- |
+| `explicit_target` | 공격 메시지가 그 아이의 메시지에 대한 답장 (`reply_to_message_id`) |
+| `name_mention` | 공격 메시지에 그 아이의 `display_name`/`aliases`가 나옴. 공격 2개 이상, 또는 그 아이가 공격 직후 반응하면 열림 |
+| `repeated_target` | 이름이 없어도, 한 가해자의 공격이 4개 이상이고 같은 아이가 공격 직후 2번 이상 반응. 웃음(ㅋㅋ)만 있는 반응은 장난으로 보고 세지 않음 |
+
+피해자도 같이 욕하면(서로 욕하는 장난) 사건이 열리지 않습니다.
 
 ## 5. `POST /bystander/events` — 앱 이벤트 보고
 
@@ -241,6 +271,10 @@ Sep 30, 2026
 
 | 구분 | 항목 | 내용 |
 | --- | --- | --- |
+| 추가 (0.3.1) | `participants` (요청) | 대화방 명단. 피해자 이름 지목에 사용 |
+| 추가 (0.3.1) | `reply_to_message_id` (요청의 Message) | 답장 대상. 피해자 지목에 사용 |
+| 추가 (0.3.1) | `victim_reason: repeated_target` | 이름 없이 반복 공격 + 피해자 반응으로 사건이 열림 |
+| 변경 (0.3.1) | `name_mention` | 본문에서 participant_code 대신 `display_name`/`aliases`를 찾음. 공격 2개 이상 또는 지목된 아이의 반응이 필요 |
 | 추가 | `message_id` (요청의 Message) | 반응 버튼·읽음 이벤트가 메시지를 가리키는 데 필요 |
 | 추가 | `track_bystander` (요청) | 전송 전 `false`, 전송 후 `true` |
 | 추가 | `incident_id`, `bystander_state` (응답) | 사건 ID와 주변인 상태 |
@@ -254,7 +288,7 @@ Sep 30, 2026
 
 **앱이 할 일**
 
-1. 모든 메시지에 `message_id`를 붙입니다.
+1. 모든 메시지에 `message_id`를 붙이고, `/analyze`에 `participants`를 보냅니다. 답장 기능이 있으면 `reply_to_message_id`도 보냅니다.
 2. 전송 전 호출에 `track_bystander: false`, 전송 후 호출에 `true`를 보냅니다.
 3. 읽음, 퇴장, 재입장, 반응, 방어 기능 사용을 `POST /bystander/events`로 보냅니다.
 4. `GET /bystander/actions`를 2\~5초마다 조회해 해당 아이 화면에만 알림을 표시합니다.
@@ -266,6 +300,8 @@ Sep 30, 2026
 
 - **서버 재시작 시 상태 손실.** 사용성 평가 규모에서는 괜찮지만, 여러 반이 오래 쓰는 효과성 평가 전에는 SQLite나 Redis 저장이 필요합니다. 연구 로그가 필요하면 `/bystander/state`를 주기적으로 저장하세요.
 - **주소가 바뀝니다.** 현재 임시 Cloudflare 터널이라 서버를 다시 켜면 기본 주소가 바뀝니다.
+- **피해자 식별의 한계.** 피해자가 말하지 않고 이름도 불리지 않으면 사건이 열리지 않습니다. 실명·별명으로 부르면 `aliases`에 있어야 이름으로 잡힙니다.
+- **방 기록도 메모리에만 있습니다.** 서버 재시작 시 방별 최근 메시지와 명단이 사라집니다.
 - **대화방당 사건 하나.** 같은 방에서 공격이 이어지면 같은 사건에 더해집니다. 새 공격 없이 30분이 지나면 사건이 닫힙니다.
 - **`cb_score` 단독 사용 금지.** 2026-09-30 실서버 테스트에서 평범한 대화가 0.53, `is_defense_action` 표시 없는 위로 메시지("네 잘못이 아니야.")가 0.315로 나왔습니다. 개입은 `is_bullying`으로 판단하세요.
 - **배제(모듈 C) 비활성.** 실제 메신저 로그가 쌓이기 전까지 `cb_type`에 `배제`는 나오지 않습니다.
@@ -273,7 +309,7 @@ Sep 30, 2026
 
 ## 부록. 서버 실행과 테스트 (연구팀용)
 
-서버는 `withu/` 패키지를 **담고 있는 폴더**에서 워커 1개로 실행합니다. 방관 판정 상태가 메모리에 있어서 워커가 여럿이면 요청마다 다른 상태를 봅니다.
+서버는 `withu/` 패키지를 **담고 있는 폴더**에서 실행합니다. 방관 판정 상태가 메모리에 있어서 워커가 여럿이면 요청마다 다른 상태를 봅니다.
 
 **터미널 1 — 서버**
 
@@ -312,11 +348,16 @@ curl https://<터널이 출력한 주소>.trycloudflare.com/health
 | `BYSTANDER_CANCEL_SEC` | 10 | 동조 반응 취소 인정 시간 (초) |
 | `BYSTANDER_IDLE_CLOSE_SEC` | 1800 | 새 공격 없이 이만큼 지나면 사건 종료 (초) |
 | `WITHU_ACTION_WEBHOOK` | 없음 | 설정하면 알림을 조회 대신 이 URL로 POST |
+| `WITHU_REPEAT_MIN_ATTACKS` | 4 | 반복 표적: 가해자 1명의 공격 수 |
+| `WITHU_REPEAT_MIN_REPLIES` | 2 | 반복 표적: 같은 아이의 반응 수 |
+| `WITHU_NAME_MIN_ATTACKS` | 2 | 이름 지목만으로 열리는 공격 수. 지목된 아이가 반응하면 1 |
+| `WITHU_HISTORY_MAX_MSGS`, `WITHU_HISTORY_MAX_SEC` | 60, 1200 | 방별 기록 길이와 보존 시간 |
+| `WITHU_ENABLE_REPEAT` | 1 | `0`이면 반복 표적 끔 |
 | `SUSPECT_THRESHOLD`, `CONFIRM_THRESHOLD` | 0.75, 0.85 | `intervention_level`용. 폐기 예정 |
 
 **실서버 테스트**
 
-서버를 켠 상태에서 `python test_live_server.py`를 실행합니다. 2026-09-30 결과는 필수 항목 25/25 통과, 참고 항목 4/6이었습니다. 참고 항목 경고 2개는 §10의 `cb_score` 제약과 같은 내용입니다.
+서버를 켠 상태에서 `python test_live_server.py`를 실행합니다. 피해자 식별은 `python test_target_live.py`로 따로 확인합니다. 2026-09-30 결과는 필수 항목 25/25 통과, 참고 항목 4/6이었습니다. 참고 항목 경고 2개는 §10의 `cb_score` 제약과 같은 내용입니다.
 
 | 영역 | 결과 |
 | --- | --- |
