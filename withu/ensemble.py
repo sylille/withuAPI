@@ -10,6 +10,7 @@ and so real models load lazily in app startup. Module contracts:
 """
 from typing import Callable, List, Optional, Dict
 from .check_chat_excel import prosocial_guard, evaluate_window
+from .target_resolver import evaluate_window_v2 as evaluate_window
 
 
 class Ensemble:

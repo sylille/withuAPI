@@ -20,6 +20,7 @@ from .schemas import AnalyzeRequest, AnalyzeResponse
 from .ensemble import Ensemble
 from .check_chat_excel import prosocial_guard
 from .bystander_api import router as bystander_router, tracker
+from .target_resolver import set_request_context 
 from . import models
 
 app = FastAPI(title="WithU Talk AI 추론 서버", version="0.3.0")
@@ -91,6 +92,7 @@ def health():
 
 @app.post("/analyze", response_model=AnalyzeResponse)
 def analyze(req: AnalyzeRequest):
+    set_request_context(req)
     body = req.model_dump()
     result = _ensemble.analyze(body)
     if req.track_bystander:

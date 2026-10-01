@@ -18,12 +18,18 @@ class Message(BaseModel):
     read_by_count: Optional[int] = None            # for exclusion / 방관 signals
     response_latency_sec: Optional[float] = None    # seconds until this speaker responded
     is_defense_action: bool = False
+    reply_to_message_id: Optional[str] = None
 
+class Participant(BaseModel):
+    participant_code: str
+    display_name: str = ""
+    aliases: List[str] = Field(default_factory=list)
 
 class AnalyzeRequest(BaseModel):
     room_id: str
     context: List[Message] = Field(default_factory=list, description="recent window, oldest→newest")
     new_message: Message
+    participants: List[Participant] = Field(default_factory=list)
     has_image: bool = False
     left_chat: bool = False
     # optional live-log metadata for the exclusion module (Module C) and 방관 log-rule
@@ -47,3 +53,5 @@ class AnalyzeResponse(BaseModel):
     evidence: str
     incident_id: Optional[str] = None                        # NEW
     bystander_state: Optional[Dict[str, Any]] = None         # NEW: incident + per-bystander stage
+    participants: List[Participant] = Field(default_factory=list)
+
