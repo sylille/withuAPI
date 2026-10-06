@@ -1,18 +1,18 @@
-# 위드유톡 AI 추론 서버 API 문서 v0.3.1
+# 위드유톡 AI 추론 서버 API 문서 v0.3.2
 
-Oct 1, 2026 
+Oct 6, 2026 
 
 https://hepatitis-instead-egg-consequently.trycloudflare.com
 
 ## 1. 개요
 
-위드유톡 AI 추론 서버는 대화방 메시지를 받아 사이버불링 여부와 가해자·피해자를 판정합니다. 사건이 열려 있는 동안에는 주변인의 방어·동조·방관 행동을 추적해, 앱이 아이에게 보여 줄 알림을 돌려줍니다. v0.3.0은 v0.2.0에 방관행동 판정부(`/bystander/*`)를 더한 버전이고, v0.3.1은 피해자 식별을 보강했습니다 (§9).
+위드유톡 AI 추론 서버는 대화방 메시지를 받아 사이버불링 여부와 가해자·피해자를 판정합니다. 사건이 열려 있는 동안에는 주변인의 방어·동조·방관 행동을 추적해, 앱이 아이에게 보여 줄 알림을 돌려줍니다. v0.3.0은 v0.2.0에 방관행동 판정부(`/bystander/*`)를 더한 버전이고, v0.3.1은 피해자 식별을 보강했습니다. v0.3.2는 가해자·피해자 방향이 틀리던 문제를 고치고, 사건이 열린 뒤에도 피해자를 바로잡습니다 (§9).
 
 | 항목 | 값 |
 | --- | --- |
 | 기본 주소 | 현재 `https://marcus-bay-system-protective.trycloudflare.com` (임시 터널) |
 | 형식 | JSON, UTF-8 (`Content-Type: application/json; charset=utf-8`) |
-| 서버 버전 | 0.3.1 |
+| 서버 버전 | 0.3.2 |
 
 **개인정보 원칙**
 
@@ -55,7 +55,7 @@ https://hepatitis-instead-egg-consequently.trycloudflare.com
 | `context` | Message\[\] | 아니오 | 직전 대화, 오래된 것부터. 기본 `[]` |
 | `participants` | Participant\[\] | 권장 | 대화방 구성원 명단. 피해자 이름 지목에 씁니다. 서버가 방별로 기억하므로 입장·변경 때만 보내도 되지만, 매번 보내도 됩니다 |
 | `track_bystander` | boolean | 아니오 | 기본 `true`. 전송 전 호출은 `false`, 전송 후 호출은 `true`. 메시지마다 `true` 호출은 한 번만 |
-| `has_image` | boolean | 아니오 | 이미지 포함 여부. 기본 `false` |
+| `has_image` | boolean | 시각적 폭력에 필요 | `new_message`가 이미지(사진·캡처)면 `true`. 기본 `false`. 이미지 바로 뒤에 다른 아이가 항의하면 그 이미지를 공격으로 셉니다 (0.3.2) |
 | `left_chat` | boolean | 아니오 | 발신자가 대화방을 나갔는지. 기본 `false` |
 | `logs` | object | 아니오 | 배제 판정(모듈 C)용 메타데이터. 현재 모듈 C는 비활성 |
 
@@ -65,7 +65,7 @@ https://hepatitis-instead-egg-consequently.trycloudflare.com
 | --- | --- | --- | --- |
 | `participant_code` | string | 예 | 발신자 가명 코드 |
 | `text` | string | 아니오 | 메시지 본문. 기본 `""` |
-| `message_id` | string | 강력 권장 | 앱의 메시지 ID. 반응 버튼·읽음 이벤트가 이 ID를 가리킵니다 |
+| `message_id` | string | 강력 권장 | 앱의 메시지 ID. 반응 버튼·읽음 이벤트가 이 ID를 가리킵니다. 이미지·무마 발화로 열리는 사건은 이 ID가 있어야 추적됩니다 |
 | `timestamp` | string | 권장 | ISO 8601. 없으면 서버 시각 |
 | `is_defense_action` | boolean | 아니오 | 챗봇 방어행동 선택지로 보낸 메시지면 `true`. 기본 `false` |
 | `read_by_count` | integer | 아니오 | 이 메시지를 읽은 인원 |
@@ -105,6 +105,8 @@ https://hepatitis-instead-egg-consequently.trycloudflare.com
 | `attribution.aggressors` | 가해자 코드 목록. `is_bullying=true`일 때만 신뢰 |
 | `attribution.victim` | 피해자 코드. `is_bullying=true`일 때만 신뢰 |
 | `attribution.victim_reason` | 피해자를 찾은 근거: `explicit_target`(답장), `name_mention`(이름), `repeated_target`(반복 공격에 같은 아이가 반응), `distress_signal`, `turn_adjacency` |
+| `attribution.victim_support` | 피해자 근거의 세기 (0.3.2). `strong`: 답장·이름으로 지목됐거나 그 아이가 직접 2번 이상 항의함. `weak`: 공격 뒤에 반응했다는 것뿐 |
+| `attribution.attack_message_ids` | 서버가 공격으로 센 메시지의 `message_id` 목록 (0.3.2). 무마 발화와 이미지도 들어갑니다 |
 | `attribution.confidence` | 역할 판정 신뢰도 0\~1 |
 | `attribution.drop_reason` | `is_bullying=false`인 이유 (예: `weak_target`). 디버그용 |
 | `cb_score` | 메시지 단위 사이버불링 점수 0\~1 (가드 적용 후). 전송 전 경고에만 사용 |
@@ -128,7 +130,8 @@ https://hepatitis-instead-egg-consequently.trycloudflare.com
   "guard_reason": "none",
   "attribution": {
     "is_bullying": true, "aggressors": ["P11"], "victim": "P03",
-    "victim_reason": "name_mention", "confidence": 1.0, "drop_reason": ""
+    "victim_reason": "name_mention", "victim_support": "strong",
+    "attack_message_ids": ["m1", "m3"], "confidence": 1.0, "drop_reason": ""
   },
   "intervention_needed": true,
   "incident_id": "08e204d0f932",
@@ -155,9 +158,23 @@ https://hepatitis-instead-egg-consequently.trycloudflare.com
 | --- | --- |
 | `explicit_target` | 공격 메시지가 그 아이의 메시지에 대한 답장 (`reply_to_message_id`) |
 | `name_mention` | 공격 메시지에 그 아이의 `display_name`/`aliases`가 나옴. 공격 2개 이상, 또는 그 아이가 공격 직후 반응하면 열림 |
-| `repeated_target` | 이름이 없어도, 한 가해자의 공격이 4개 이상이고 같은 아이가 공격 직후 2번 이상 반응. 웃음(ㅋㅋ)만 있는 반응은 장난으로 보고 세지 않음 |
+| `repeated_target` | 이름이 없어도, 한 가해자의 공격이 4개 이상이고 같은 아이가 공격 직후 2번 이상 반응. 반응 수는 (항의 + 그 밖의 반응 − 맞장구)로 셉니다 |
 
 피해자도 같이 욕하면(서로 욕하는 장난) 사건이 열리지 않습니다.
+
+### 메시지 성격 (0.3.2)
+
+공격 뒤에 말했다고 모두 피해자는 아닙니다. 서버는 메시지마다 성격을 보고 방향을 정합니다. 낱말 규칙이며 모델 점수와는 별개입니다.
+
+| 성격 | 예 | 처리 |
+| --- | --- | --- |
+| 항의 | 하지 말라고, 그만해, 지워줘, 왜 나만, ㅠㅠ | 피해자 근거. 점수가 높아도 공격으로 세지 않음 |
+| 맞장구 | ㅇㅈ, 팩트, ㄹㅇ, 맞아, ㅋㅋ | 가해자 편으로 봄. 반응 수에서 뺌 |
+| 무마 | 장난인데, 왜 화냄?, 예민하네 | 바로 앞(3개 안)에 다른 아이의 항의가 있으면 공격으로 셈 |
+| 말리기 | 그만 싸워, 너무 심하잖아, 얘들아 진정해 | 주변인의 방어. 공격으로도 피해자 근거로도 세지 않음 |
+| 이미지 | `has_image: true` | 바로 뒤(3개 안)에 다른 아이의 항의가 있으면 공격으로 셈 |
+
+욕설이 섞인 항의("그만해 병신아")는 되받아치는 것으로 보고 공격으로 셉니다. 웃음이 섞인 항의("아 하지마 ㅋㅋㅋ")는 근거로 쓰지 않습니다.
 
 ## 5. `POST /bystander/events` — 앱 이벤트 보고
 
@@ -203,7 +220,8 @@ https://hepatitis-instead-egg-consequently.trycloudflare.com
 
 | `action` | 언제 나오나 | 앱 동작 | `payload` |
 | --- | --- | --- | --- |
-| `incident_open` | 사건 시작 | 상황 알림 배너 등. `participant_code` 없음 | `aggressors`, `victim` |
+| `incident_open` | 사건 시작 | 상황 알림 배너 등. `participant_code` 없음 | `aggressors`, `victim`, `victim_reason`, `victim_status` |
+| `incident_update` | 피해자가 바뀌거나(`change: victim_changed`) 확정됨(`change: victim_confirmed`) (0.3.2) | 아래 "피해자가 바뀔 때" 참고. `participant_code` 없음 | `change`, `aggressors`, `victim`, `victim_reason`, `victim_status`, 바뀐 경우 `previous_victim`, `previous_victim_role`, `new_victim_was_bystander` |
 | `nudge_1` | 노출 후 30초 무반응, 또는 무관한 대화 | 1차 알림: 챗봇 말풍선 | — |
 | `nudge_2` | 노출 후 60초 무반응 (방관 확정) | 2차 알림 + 방어행동 선택지 | `choices: true` |
 | `summary` | 사건 후 10분 넘어 처음 봄, 또는 안 읽은 메시지 30개 이상 | 사건 요약을 먼저 표시한 뒤 `summary_shown` 전송 | `aggressors`, `victim`, `n_attack_messages`, `first_attack_at`, `last_attack_at` |
@@ -212,7 +230,23 @@ https://hepatitis-instead-egg-consequently.trycloudflare.com
 | `positive_feedback` | 방어행동 판정 | 짧은 긍정 피드백 | — |
 | `join_feedback` | 동조 판정 | 영향 안내. 반응 버튼이면 취소 가능 | `cancel_window_sec` (반응 버튼 10, 발화 0) |
 
-`text`는 서버의 권장 문구이며 최종 문구는 앱에서 정합니다. `incident_open`처럼 문구가 없는 알림은 `text`가 `null`입니다.
+`text`는 서버의 권장 문구이며 최종 문구는 앱에서 정합니다. `incident_open`, `incident_update`처럼 문구가 없는 알림은 `text`가 `null`입니다.
+
+**피해자가 바뀔 때 (`incident_update`, `change: victim_changed`)**
+
+```json
+{ "action": "incident_update", "participant_code": null, "incident_id": "08e204d0f932",
+  "payload": { "change": "victim_changed", "aggressors": ["P11", "P07"], "victim": "P03",
+               "victim_reason": "name_mention", "victim_status": "confirmed",
+               "previous_victim": "P07", "previous_victim_role": "가해자",
+               "new_victim_was_bystander": "방어" } }
+```
+
+- `previous_victim`에게 진행 중이던 피해자용 기능(1:1 위로 메시지 등)을 멈추고, `victim`에게 시작합니다.
+- `new_victim_was_bystander`가 `null`이 아니면 새 피해자가 그동안 주변인으로 분류되어 알림을 받았다는 뜻입니다. 화면에 남은 주변인용 알림을 닫습니다.
+- `previous_victim_role`은 이전 피해자의 새 역할입니다 (`가해자` 또는 `주변인`).
+
+**`victim_status`** 는 `provisional`(근거가 공격 뒤 반응뿐) 또는 `confirmed`(답장·이름으로 지목됐거나 그 아이가 직접 2번 이상 항의함)입니다. `provisional`일 때는 피해자를 특정하는 기능(1:1 위로 메시지, 교사 알림 카드의 이름)을 미루고 `confirmed`가 된 뒤에 내보내기를 권장합니다. 주변인 알림은 `provisional`에서도 그대로 나갑니다.
 
 ## 7. `GET /bystander/state?room_id=…&participant_code=…` — 상태 조회
 
@@ -221,7 +255,8 @@ https://hepatitis-instead-egg-consequently.trycloudflare.com
 ```json
 { "room_id": "room_001", "incident": {
   "incident_id": "08e204d0f932", "active": true,
-  "aggressors": ["P11"], "victim": "P03", "n_attack_messages": 3,
+  "aggressors": ["P11"], "victim": "P03", "victim_reason": "name_mention",
+  "victim_status": "confirmed", "previous_victims": [], "n_attack_messages": 3,
   "first_attack_at": "2026-10-05T14:21:40", "last_attack_at": "2026-10-05T14:22:01",
   "bystanders": [
     { "participant_code": "P05", "stage": "defended", "behavior": "방어", "subtype": null,
@@ -232,6 +267,9 @@ https://hepatitis-instead-egg-consequently.trycloudflare.com
 
 | 필드 | 값 |
 | --- | --- |
+| `victim_reason` | 지금 피해자를 뒷받침한 가장 강한 근거 (0.3.2) |
+| `victim_status` | `provisional` 또는 `confirmed` (§6) (0.3.2) |
+| `previous_victims` | 이 사건에서 피해자였다가 바뀐 아이들 (0.3.2) |
 | `stage` | `unseen`, `observing`, `candidate`, `confirmed`, `left`, `defended`, `joined`, `closed` (§8) |
 | `behavior` | `방어`, `동조`, `방관`, 또는 `null` |
 | `subtype` | 방관일 때만: `침묵`, `채팅방 나가기`, `무관 대화` |
@@ -256,6 +294,19 @@ https://hepatitis-instead-egg-consequently.trycloudflare.com
 - **방관→방어, 동조→방어 전환**은 `history`에 기록됩니다.
 - 새 공격 없이 30분이 지나면 사건이 닫히고, 아직 판정 전인 주변인은 `closed`가 됩니다.
 
+**피해자 갱신 (0.3.2)**
+
+사건이 열린 뒤에도 `/analyze` 판정을 따라 피해자를 고칩니다. v0.3.1까지는 처음 잡힌 피해자가 사건이 끝날 때까지 남았습니다.
+
+| 새 판정 | 피해자가 바뀌는 때 |
+| --- | --- |
+| 지금 피해자가 가해자로 판정됨 | 바로 |
+| 더 강한 근거로 다른 아이가 피해자로 나옴 (답장 > 이름 > 반응) | 바로 |
+| 같은 세기의 근거 | 2번 연속 |
+| 더 약한 근거 | 3번 연속 |
+
+바뀌면 `incident_update`가 나가고, 새 피해자는 가해자·주변인 목록에서 빠집니다. 한 아이가 가해자이면서 피해자인 상태는 생기지 않습니다. 이미 나간 알림(잘못 잡힌 피해자에게 간 위로 메시지, 진짜 피해자에게 간 방관 알림)은 서버가 되돌릴 수 없으므로 앱이 `incident_update`를 받아 정리합니다.
+
 **반응 버튼 판정** (반응을 누른 메시지의 발신자 기준)
 
 | 반응 대상 | 공감·슬퍼요·하트 | 좋아요 | 웃겨요 | 싫어요·화나요 |
@@ -271,6 +322,12 @@ https://hepatitis-instead-egg-consequently.trycloudflare.com
 
 | 구분 | 항목 | 내용 |
 | --- | --- | --- |
+| 수정 (0.3.2) | 피해자 고정 | 사건이 열린 뒤 피해자가 바뀌지 않던 문제. 이제 판정을 따라 갱신 (§8) |
+| 수정 (0.3.2) | `repeated_target` 방향 | 맞장구친 같은 편이 피해자로 잡히거나, 피해자의 항의가 공격으로 세어져 가해자·피해자가 뒤바뀌던 문제 (§4 메시지 성격) |
+| 추가 (0.3.2) | `incident_update` (알림) | 피해자 변경·확정을 앱에 알림 (§6) |
+| 추가 (0.3.2) | `victim_status`, `victim_reason`, `previous_victims` | 사건 상태와 `incident_open`·`incident_update` payload |
+| 추가 (0.3.2) | `attribution.victim_support`, `attribution.attack_message_ids` | 피해자 근거의 세기, 공격으로 센 메시지 |
+| 변경 (0.3.2) | `has_image` | 이미지 뒤에 다른 아이가 항의하면 그 이미지를 공격으로 셈. 시각적 폭력 판정에 필요 |
 | 추가 (0.3.1) | `participants` (요청) | 대화방 명단. 피해자 이름 지목에 사용 |
 | 추가 (0.3.1) | `reply_to_message_id` (요청의 Message) | 답장 대상. 피해자 지목에 사용 |
 | 추가 (0.3.1) | `victim_reason: repeated_target` | 이름 없이 반복 공격 + 피해자 반응으로 사건이 열림 |
@@ -293,6 +350,9 @@ https://hepatitis-instead-egg-consequently.trycloudflare.com
 3. 읽음, 퇴장, 재입장, 반응, 방어 기능 사용을 `POST /bystander/events`로 보냅니다.
 4. `GET /bystander/actions`를 2\~5초마다 조회해 해당 아이 화면에만 알림을 표시합니다.
 5. `intervention_level`에 걸린 개입 동작을 `attribution.is_bullying` 기준으로 옮깁니다.
+6. (0.3.2) `incident_update` 알림을 처리합니다. 피해자가 바뀌면 피해자용 기능을 새 피해자로 옮깁니다 (§6).
+7. (0.3.2) 피해자를 특정하는 기능은 `victim_status`가 `confirmed`일 때 내보냅니다 (권장).
+8. (0.3.2) 이미지 메시지도 `/analyze`로 보내고 `has_image: true`를 붙입니다. 본문이 없으면 `text`는 `""`로 보냅니다.
 
 ## 10. 알려진 제약
 
@@ -301,6 +361,9 @@ https://hepatitis-instead-egg-consequently.trycloudflare.com
 - **서버 재시작 시 상태 손실.** 사용성 평가 규모에서는 괜찮지만, 여러 반이 오래 쓰는 효과성 평가 전에는 SQLite나 Redis 저장이 필요합니다. 연구 로그가 필요하면 `/bystander/state`를 주기적으로 저장하세요.
 - **주소가 바뀝니다.** 현재 임시 Cloudflare 터널이라 서버를 다시 켜면 기본 주소가 바뀝니다.
 - **피해자 식별의 한계.** 피해자가 말하지 않고 이름도 불리지 않으면 사건이 열리지 않습니다. 실명·별명으로 부르면 `aliases`에 있어야 이름으로 잡힙니다.
+- **방향 판정은 낱말 규칙입니다 (0.3.2).** 항의·맞장구·무마·말리기를 정해진 표현으로 찾습니다. 목록에 없는 표현은 평범한 반응으로 처리됩니다. 말리는 주변인이 "하지 마"처럼 피해자와 같은 표현만 쓰면 피해자 후보로 잡힐 수 있습니다. 그래서 반응만으로 잡힌 피해자는 `provisional`로 표시합니다.
+- **방에 없는 피해자.** 대화방에 없어도 `participants`에 있으면 이름으로 피해자로 지목됩니다. `participants`에 없으면 사건이 열리지 않습니다 (예전처럼 같은 편 아이가 피해자로 잡히지는 않습니다). 방에 없는 아이에게 무엇을 보낼지는 정해지지 않았습니다.
+- **시각적 폭력.** 서버는 이미지 내용을 보지 않습니다. `has_image`와 뒤따르는 항의·무마 발화로만 판단합니다. 이름·답장 지목이 없으면 공격으로 센 메시지가 4개 이상이어야 열립니다.
 - **방 기록도 메모리에만 있습니다.** 서버 재시작 시 방별 최근 메시지와 명단이 사라집니다.
 - **대화방당 사건 하나.** 같은 방에서 공격이 이어지면 같은 사건에 더해집니다. 새 공격 없이 30분이 지나면 사건이 닫힙니다.
 - **`cb_score` 단독 사용 금지.** 2026-09-30 실서버 테스트에서 평범한 대화가 0.53, `is_defense_action` 표시 없는 위로 메시지("네 잘못이 아니야.")가 0.315로 나왔습니다. 개입은 `is_bullying`으로 판단하세요.
@@ -353,11 +416,16 @@ curl https://<터널이 출력한 주소>.trycloudflare.com/health
 | `WITHU_NAME_MIN_ATTACKS` | 2 | 이름 지목만으로 열리는 공격 수. 지목된 아이가 반응하면 1 |
 | `WITHU_HISTORY_MAX_MSGS`, `WITHU_HISTORY_MAX_SEC` | 60, 1200 | 방별 기록 길이와 보존 시간 |
 | `WITHU_ENABLE_REPEAT` | 1 | `0`이면 반복 표적 끔 |
+| `WITHU_ENABLE_RESIST_GUARD` | 1 | `0`이면 항의·말리기 발화도 점수대로 공격으로 셈 (0.3.1 동작) |
+| `WITHU_ENABLE_PSEUDO_ATTACK` | 1 | `0`이면 무마 발화·이미지를 공격으로 세지 않음 |
+| `WITHU_REPEAT_MIN_PROTEST` | 0 | 반복 표적에 꼭 있어야 하는 항의 반응 수. `1` 이상이면 더 엄격 |
+| `WITHU_PROTEST_REPLY_WEIGHT` | 3.0 | 항의 반응 1번의 점수 (그 밖의 반응 2, 맞장구 −2) |
+| `BYSTANDER_VICTIM_SWITCH_SAME`, `BYSTANDER_VICTIM_SWITCH_WEAKER` | 2, 3 | 피해자 교체에 필요한 연속 판정 수 (같은 세기, 더 약한 세기) |
 | `SUSPECT_THRESHOLD`, `CONFIRM_THRESHOLD` | 0.75, 0.85 | `intervention_level`용. 폐기 예정 |
 
 **실서버 테스트**
 
-서버를 켠 상태에서 `python test_live_server.py`를 실행합니다. 피해자 식별은 `python test_target_live.py`로 따로 확인합니다. 2026-09-30 결과는 필수 항목 25/25 통과, 참고 항목 4/6이었습니다. 참고 항목 경고 2개는 §10의 `cb_score` 제약과 같은 내용입니다.
+서버를 켠 상태에서 `python test_live_server.py`를 실행합니다. 피해자 식별은 `python test_target_live.py`로 따로 확인합니다. 2026-09-30 결과(v0.3.0)는 필수 항목 25/25 통과, 참고 항목 4/6이었습니다. v0.3.2 확인은 표 아래에 있습니다. 참고 항목 경고 2개는 §10의 `cb_score` 제약과 같은 내용입니다.
 
 | 영역 | 결과 |
 | --- | --- |
@@ -370,3 +438,24 @@ curl https://<터널이 출력한 주소>.trycloudflare.com/health
 | 퇴장·비정상 종료·재입장·지연 목격 요약 | 통과 |
 | 침묵 타이머 30초·60초, 알림 최대 2회 | 통과 |
 | 방관→방어 전환과 긍정 피드백 | 통과 |
+
+**v0.3.2 확인 (2026-10-06)**
+
+모델 없이 도는 테스트는 통과했습니다. 실제 모델과 실제 사후·추수검사 대본 8편으로는 아직 확인하지 않았습니다.
+
+```bash
+cd ~/Downloads
+python withu/test_target_resolver.py      # 기존 14개
+python withu/test_victim_direction.py     # 피해자 갱신·방향 판정 19개
+python test_scripts_live.py --base http://127.0.0.1:8000 사후1.json …   # 서버를 켠 뒤, 대본 JSON으로
+```
+
+| 확인 | 결과 |
+| --- | --- |
+| 기존 단위 테스트 (`test_target_resolver.py`) | 14/14 |
+| 새 단위 테스트 (`test_victim_direction.py`) | 19/19 |
+| 같은 대본을 v0.3.1 코드에 넣었을 때 | 보고된 오류 3가지가 그대로 재현됨 (같은 편이 피해자, 방에 없는 피해자 대신 같은 편, 가해자·피해자 뒤바뀜) |
+| 기존 실서버 테스트 (`test_live_server.py`, 모델 대신 욕설 사전) | 필수 25/25, 수정 전과 같음 |
+| 검증 코퍼스 (WCB001\~005, 발화자를 코드로 바꿔 흘려 보냄) | 사건 5/5 유지. 피해자 일치 89.3% → 88.0%, 사건 밖 오탐 41 → 46건 |
+
+새 단위 테스트의 대본은 앱팀 보고에 나온 대사에 가상의 앞부분을 붙인 것이고, 점수도 실제 모델 값이 아닙니다. 검증 코퍼스에는 이번 오류 유형(맞장구, 항의, 무마)이 거의 없어서 개선도 악화도 뚜렷하지 않습니다. 코퍼스의 피해자 반응 170개 중 항의 표현은 10개뿐이었습니다. 실제 효과는 `test_scripts_live.py`로 대본 8편을 다시 돌려서 확인해야 합니다.
