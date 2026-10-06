@@ -118,7 +118,11 @@ class Ensemble:
                     "victim": attr.victim,                # 피해자
                     "victim_reason": attr.victim_reason,
                     "confidence": attr.confidence,
-                    "drop_reason": verdict["drop_reason"]},
+                    "drop_reason": verdict["drop_reason"],
+                    # v0.3.2: 서버가 공격으로 센 메시지 (무마 발화·이미지 포함) -> 방관 판정부의 사건 메시지
+                    "attack_message_ids": verdict.get("attack_mids", []),
+                    # v0.3.2: strong = 답장·이름 지목 또는 본인의 항의 2번 이상, weak = 반응 패턴뿐
+                    "victim_support": verdict.get("victim_support", "weak")},
                 "suppressed": suppressed, "guard_reason": guard_reason,   # NEW
                 "bystander_behavior": bystander,
                 "module_scores": {"message": round(m_score, 4), "context": round(c_score, 4),

@@ -31,6 +31,16 @@ Design notes
   GET /bystander/actions (or via an optional webhook).
 * State is in memory -> run uvicorn with ONE worker; a restart forgets open incidents.
 * Every public method takes an optional `now` so the whole thing is testable with a fake clock.
+
+v0.3.2 — 피해자 갱신
+------------------
+사건이 열린 뒤에도 /analyze 판정을 따라 피해자를 고친다 (예전에는 처음 잡힌 피해자가 끝까지 남았다).
+  * 지금 피해자가 가해자로 판정되면                      -> 바로 교체
+  * 더 강한 근거(답장 > 이름 > 반응)로 다른 아이가 나오면  -> 바로 교체
+  * 같은 세기의 근거면 2번 연속, 더 약한 근거면 3번 연속   -> 교체
+교체되면 `incident_update` 알림이 나가고, 한 아이가 가해자이면서 피해자인 상태는 생기지 않는다.
+피해자가 이름·답장으로 지목됐거나 본인이 2번 이상 항의했으면(attribution.victim_support=strong)
+victim_status가 confirmed가 된다. 그 전까지는 provisional이다.
 """
 from __future__ import annotations
 
@@ -57,6 +67,12 @@ INCIDENT_IDLE_CLOSE_SEC = float(os.environ.get("BYSTANDER_IDLE_CLOSE_SEC", 1800)
 TOX_THRESHOLD           = 0.50   # same as check_chat_excel.TOX_THRESHOLD
 UNRELATED_LABELS        = {"방관"}  # Module D labels treated as '무관 대화' (add "비해당" to be stricter)
 CONTEXT_TURNS           = 6       # turns passed to the Module D classifier
+# 피해자 근거의 세기 (클수록 강함)
+VICTIM_RANK = {"explicit_target": 3, "name_mention": 2, "distress_signal": 1, "repeated_target": 1,
+               "turn_adjacency": 0}
+VICTIM_CONFIRM_RANK     = 2       # 이 세기 이상이면 confirmed (또는 attribution.victim_support == "strong")
+VICTIM_SWITCH_SAME      = int(os.environ.get("BYSTANDER_VICTIM_SWITCH_SAME", 2))       # 같은 세기: 연속 판정 수
+VICTIM_SWITCH_WEAKER    = int(os.environ.get("BYSTANDER_VICTIM_SWITCH_WEAKER", 3))     # 더 약한 세기: 연속 판정 수
 
 NUDGE_TEXT = {  # suggested copy; the app owns final wording
     "nudge_1": "가만히 있는다면 공격받는 친구가 힘들어 할거야.",
@@ -159,6 +175,15 @@ class Incident:
     n_anchor: int = 0
     closed: bool = False
     bystanders: dict = field(default_factory=dict)   # code -> Bystander
+    victim_reason: Optional[str] = None      # 지금 피해자를 뒷받침한 가장 강한 근거
+    victim_rank: int = 0
+    victim_verdicts: int = 0                 # 지금 피해자를 가리킨 판정 수
+    victim_confirmed: bool = False
+    previous_victims: list = field(default_factory=list)
+    _cand: Optional[str] = None              # 교체 후보
+    _cand_streak: int = 0
+    _cand_rank: int = 0
+    _cand_reason: Optional[str] = None
 
     def role_of(self, code: Optional[str]) -> Optional[str]:
         if code is None: return None
@@ -169,6 +194,9 @@ class Incident:
     def to_dict(self) -> dict:
         return {"incident_id": self.incident_id, "room_id": self.room_id, "active": not self.closed,
                 "aggressors": sorted(self.aggressors), "victim": self.victim,
+                "victim_reason": self.victim_reason,
+                "victim_status": "confirmed" if self.victim_confirmed else "provisional",
+                "previous_victims": list(self.previous_victims),
                 "first_attack_at": _iso(self.first_anchor_ts), "last_attack_at": _iso(self.last_anchor_ts),
                 "n_attack_messages": self.n_anchor,
                 "bystanders": [b.to_dict() for b in self.bystanders.values()]}
@@ -215,19 +243,27 @@ class BystanderTracker:
             # 1) create / extend the incident when the event gate says bullying
             if attr.get("is_bullying"):
                 aggr = set(attr.get("aggressors") or [])
-                anchors = [w for w in window if w["speaker"] in aggr and (w.get("cb") or 0) >= TOX_THRESHOLD]
+                if inc is not None:                 # v0.3.2: 피해자는 열린 뒤에도 판정을 따라 고친다
+                    self._update_victim(room, inc, attr, aggr, now)
+                    inc.aggressors |= (aggr - {inc.victim})      # 한 아이가 가해자이면서 피해자일 수 없다
+                    for c in list(inc.bystanders):
+                        if c in inc.aggressors or c == inc.victim:
+                            inc.bystanders.pop(c)
+                # 공격 메시지: 점수 기준 + 서버가 공격으로 본 메시지(무마 발화·이미지 포함, attack_message_ids)
+                attack_ids = set(attr.get("attack_message_ids") or [])
+                anchors = [w for w in window if w["speaker"] in aggr and
+                           ((w.get("cb") or 0) >= TOX_THRESHOLD or (w.get("message_id") in attack_ids))]
                 if anchors:
                     a_first = min(w["ts"] for w in anchors)
                     a_last = max(w["ts"] for w in anchors)
                     if inc is None:
                         inc = Incident(uuid.uuid4().hex[:12], room, set(aggr), attr.get("victim"), a_first, a_last)
+                        inc.aggressors.discard(inc.victim)
+                        self._note_victim(inc, attr)
                         self.incidents[inc.incident_id] = inc
                         self.active_by_room[room] = inc.incident_id
-                        self._queue(room, inc, None, "incident_open", now,
-                                    {"aggressors": sorted(aggr), "victim": inc.victim})
+                        self._queue(room, inc, None, "incident_open", now, self._roles_payload(inc))
                     else:
-                        inc.aggressors |= aggr
-                        inc.victim = inc.victim or attr.get("victim")
                         inc.last_anchor_ts = max(inc.last_anchor_ts, a_last)
                     new_ids = {w.get("message_id") or f"{w['speaker']}@{w['ts']}" for w in anchors} - inc.anchor_ids
                     inc.anchor_ids |= new_ids
@@ -358,6 +394,67 @@ class BystanderTracker:
         self._stop.set()
 
     # ------------------------------------------------------------------ internals
+    @staticmethod
+    def _roles_payload(inc: Incident, **extra) -> dict:
+        return {"aggressors": sorted(inc.aggressors), "victim": inc.victim, "victim_reason": inc.victim_reason,
+                "victim_status": "confirmed" if inc.victim_confirmed else "provisional", **extra}
+
+    @staticmethod
+    def _note_victim(inc: Incident, attr: dict) -> bool:
+        """판정이 지금 피해자를 다시 가리켰다. 근거를 쌓고, 새로 confirmed가 되면 True."""
+        reason = attr.get("victim_reason")
+        rank = VICTIM_RANK.get(reason, 0)
+        inc.victim_verdicts += 1
+        if inc.victim_reason is None or rank > inc.victim_rank:
+            inc.victim_reason, inc.victim_rank = reason, rank
+        inc._cand, inc._cand_streak, inc._cand_rank, inc._cand_reason = None, 0, 0, None
+        was = inc.victim_confirmed
+        inc.victim_confirmed = was or inc.victim_rank >= VICTIM_CONFIRM_RANK \
+            or attr.get("victim_support") == "strong"
+        return inc.victim_confirmed and not was
+
+    def _update_victim(self, room: str, inc: Incident, attr: dict, aggr: set, now: float):
+        """Follow the latest /analyze verdict instead of freezing the first victim (v0.3.2)."""
+        v = attr.get("victim")
+        if not v:
+            return
+        if inc.victim is None:
+            inc.victim = v
+        if v == inc.victim:
+            if self._note_victim(inc, attr):
+                self._queue(room, inc, None, "incident_update", now,
+                            self._roles_payload(inc, change="victim_confirmed"))
+            return
+        reason = attr.get("victim_reason")
+        rank = VICTIM_RANK.get(reason, 0)
+        if v == inc._cand:
+            inc._cand_streak += 1
+            if rank > inc._cand_rank:
+                inc._cand_rank, inc._cand_reason = rank, reason
+        else:
+            inc._cand, inc._cand_streak, inc._cand_rank, inc._cand_reason = v, 1, rank, reason
+        strong = attr.get("victim_support") == "strong"
+        if inc.victim in aggr or inc._cand_rank > inc.victim_rank:
+            need = 1
+        elif inc._cand_rank == inc.victim_rank:
+            need = VICTIM_SWITCH_SAME
+        else:
+            need = VICTIM_SWITCH_WEAKER
+        if inc._cand_streak < need:
+            return
+        old, streak = inc.victim, inc._cand_streak
+        inc.previous_victims.append(old)
+        inc.victim, inc.victim_reason, inc.victim_rank = v, inc._cand_reason, inc._cand_rank
+        inc.victim_verdicts = streak
+        inc.victim_confirmed = inc.victim_rank >= VICTIM_CONFIRM_RANK or strong
+        inc._cand, inc._cand_streak, inc._cand_rank, inc._cand_reason = None, 0, 0, None
+        inc.aggressors.discard(v)
+        was_bystander = inc.bystanders.pop(v, None)
+        self._queue(room, inc, None, "incident_update", now, self._roles_payload(
+            inc, change="victim_changed", previous_victim=old,
+            previous_victim_role="가해자" if old in (inc.aggressors | aggr) else "주변인",
+            new_victim_was_bystander=was_bystander.behavior if was_bystander else None))
+
     def _active(self, room: str) -> Optional[Incident]:
         iid = self.active_by_room.get(room)
         inc = self.incidents.get(iid) if iid else None
