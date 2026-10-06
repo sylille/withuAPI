@@ -10,7 +10,7 @@ https://carolina-joel-true-builders.trycloudflare.com
 
 | 항목 | 값 |
 | --- | --- |
-| 기본 주소 | 현재 `https://marcus-bay-system-protective.trycloudflare.com` (임시 터널) |
+| 기본 주소 | 페이지 맨 위 링크 (임시 터널) |
 | 형식 | JSON, UTF-8 (`Content-Type: application/json; charset=utf-8`) |
 | 서버 버전 | 0.3.2 |
 
