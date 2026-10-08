@@ -19,7 +19,11 @@ Env (provider is picked automatically from whichever key is set; Anthropic wins 
   OPENAI_API_KEY     -> OpenAI
   BYSTANDER_LLM_PROVIDER  force "anthropic" or "openai"
   BYSTANDER_LLM_MODEL     override the model (default: claude-sonnet-4-6 / gpt-4o-mini)
-  BYSTANDER_LLM_TIMEOUT   seconds per call (default 10)
+  BYSTANDER_LLM_TIMEOUT   seconds per call (default 6)
+  BYSTANDER_LLM_RETRIES   extra attempts after a failure (default 1)
+
+v0.3.3: 실패하면 빨리 끝낸다. 예전에는 실패할 때마다 1.5·3·4.5초를 쉬어 한 번에 9초가 걸렸고,
+        실패 사실이 어디에도 남지 않았다. 이제 마지막 오류를 STATUS에 남기고(/health에서 보임) 로그에 찍는다.
 """
 from __future__ import annotations
 import json
@@ -33,7 +37,10 @@ PROVIDER = os.environ.get("BYSTANDER_LLM_PROVIDER") or (
 MODEL = os.environ.get("BYSTANDER_LLM_MODEL") or os.environ.get("OPENAI_MODEL") if PROVIDER == "openai" \
     else os.environ.get("BYSTANDER_LLM_MODEL")
 MODEL = MODEL or ("claude-sonnet-4-6" if PROVIDER == "anthropic" else "gpt-4o-mini")
-TIMEOUT = float(os.environ.get("BYSTANDER_LLM_TIMEOUT", 10))
+TIMEOUT = float(os.environ.get("BYSTANDER_LLM_TIMEOUT", 6))
+RETRIES = int(os.environ.get("BYSTANDER_LLM_RETRIES", 1))
+# 마지막 호출 결과. app.py의 /health가 그대로 보여 준다.
+STATUS = {"state": "unknown", "error": None, "ok": 0, "failed": 0, "last_ms": None}
 
 RUBRIC = """너는 초등학생 단체 채팅방에서 '사이버불링이 진행 중인 상황'의 주변인(가해자·피해자가 아닌 참여자) 반응을 분류한다.
 맥락의 발화자 이름 뒤 괄호는 역할이다: (가해자), (피해자), (주변인).
@@ -83,13 +90,13 @@ def call_llm(system: str, user: str) -> str:
     if PROVIDER == "anthropic":
         if _client is None:
             from anthropic import Anthropic    # reads ANTHROPIC_API_KEY
-            _client = Anthropic(timeout=TIMEOUT)
+            _client = Anthropic(timeout=TIMEOUT, max_retries=0)
         msg = _client.messages.create(model=MODEL, max_tokens=300, system=system,
                                       messages=[{"role": "user", "content": user}])
         return "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
     if _client is None:
         from openai import OpenAI              # reads OPENAI_API_KEY
-        _client = OpenAI(timeout=TIMEOUT)
+        _client = OpenAI(timeout=TIMEOUT, max_retries=0)
     r = _client.chat.completions.create(
         model=MODEL,
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}])
@@ -111,18 +118,36 @@ def parse_label(txt: str):
     return "비해당", "(unparseable)"
 
 
-def classify_bystander(context, speaker, target_text, retries: int = 2):
+def classify_bystander(context, speaker, target_text, retries: int = None):
     """context: [(speaker, text), ...] oldest->newest. Returns (label, reason).
-    Never raises: on repeated failure returns ('비해당', '(error: ...)') so nothing is triggered."""
+    Never raises: on failure returns ('비해당', '(error: ...)'). 호출한 쪽은 reason이 '(error'로 시작하면
+    LLM이 답하지 못한 것으로 보고 키워드 규칙으로 대신 판정한다 (bystander.py)."""
+    retries = RETRIES if retries is None else retries
     user = build_user_prompt(context, speaker, target_text)
     last = None
+    t0 = time.time()
     for i in range(retries + 1):
         try:
-            return parse_label(call_llm(RUBRIC, user))
+            out = parse_label(call_llm(RUBRIC, user))
+            STATUS.update(state="ok", error=None, ok=STATUS["ok"] + 1, last_ms=int((time.time() - t0) * 1000))
+            return out
         except Exception as e:
             last = e
-            time.sleep(1.5 * (i + 1))
-    return "비해당", f"(error: {last})"
+            if i < retries:
+                time.sleep(0.3)
+    err = f"{type(last).__name__}: {last}"[:300]
+    if STATUS["error"] != err:                       # 같은 오류는 한 번만 찍는다
+        print(f"[bystander] !! LLM 호출 실패 ({PROVIDER}/{MODEL}): {err}", flush=True)
+    STATUS.update(state="error", error=err, failed=STATUS["failed"] + 1, last_ms=int((time.time() - t0) * 1000))
+    return "비해당", f"(error: {err})"
+
+
+def self_check():
+    """서버 시작 때 한 번 불러 LLM이 실제로 답하는지 확인한다. 결과는 STATUS에 남는다."""
+    lab, why = classify_bystander([("P11(가해자)", "너 진짜 냄새나 꺼져")], "P05(주변인)", "야 그만해", retries=0)
+    ok = not str(why).startswith("(error")
+    print(f"[bystander] LLM 확인: {'정상' if ok else '실패'} ({PROVIDER}/{MODEL}) -> {lab} {'' if ok else why}", flush=True)
+    return ok
 
 
 if __name__ == "__main__":             # quick live check:  python -m withu.phase4_bystander

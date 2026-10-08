@@ -41,6 +41,12 @@ v0.3.2 — 피해자 갱신
 교체되면 `incident_update` 알림이 나가고, 한 아이가 가해자이면서 피해자인 상태는 생기지 않는다.
 피해자가 이름·답장으로 지목됐거나 본인이 2번 이상 항의했으면(attribution.victim_support=strong)
 victim_status가 confirmed가 된다. 그 전까지는 provisional이다.
+
+v0.3.3
+------
+  * 주변인 발화 판정(LLM)은 잠금 밖에서 한다. 예전에는 LLM을 기다리는 동안 모든 방의 요청과 타이머가 멈췄다.
+  * LLM이 답하지 못하면(키 없음·시간 초과 등) 키워드 규칙으로 대신 판정하고, 어느 쪽으로 판정했는지 history에 남긴다.
+  * 본인의 항의로 confirmed가 된 피해자는 이름으로 지목된 피해자와 같은 세기로 본다. 약한 근거 한 번으로는 바뀌지 않는다.
 """
 from __future__ import annotations
 
@@ -53,6 +59,8 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Optional
+
+from .target_resolver import stance as _stance
 
 # ============================================================================
 # CONFIG (override with env vars on the server)
@@ -231,6 +239,7 @@ class BystanderTracker:
         new = req["new_message"]
         speaker = new["participant_code"]
         t_msg = _ts(new.get("timestamp"), now)
+        fixed_now = now is not None                    # 테스트용 가짜 시계
         now = now if now is not None else time.time()
         with self._lock:
             for w in window:
@@ -280,6 +289,7 @@ class BystanderTracker:
                                 self._expose(inc, b, seen, now)
 
             # 2) a bystander talking during an active incident
+            pending = None
             if inc is not None and not inc.closed and inc.role_of(speaker) == "주변인":
                 self.last_seen[(room, speaker)] = max(self.last_seen.get((room, speaker), 0), t_msg)
                 b = self._by(inc, speaker)
@@ -288,10 +298,25 @@ class BystanderTracker:
                 if b.stage != "unseen":
                     if new.get("is_defense_action"):
                         self._defend(inc, b, now, "방어 기능 메시지")
-                    else:
-                        label = result.get("bystander_behavior") or self._classify(inc, req, speaker)
-                        self._apply_label(inc, b, label, now)
-            return inc.to_dict() if inc else None
+                    elif result.get("bystander_behavior"):
+                        self._apply_label(inc, b, result["bystander_behavior"], now, "391")
+                    elif (new.get("text") or "").strip():           # 본문 없는 메시지(이미지)는 발화 판정을 하지 않는다
+                        pending = (inc.incident_id, self._classify_inputs(inc, req, speaker))
+            if pending is None:
+                return inc.to_dict() if inc else None
+
+        # 3) LLM 판정은 잠금 밖에서 (v0.3.3). 그동안 다른 방의 요청과 타이머는 계속 돈다.
+        iid, inputs = pending
+        label, src = self._run_classifier(*inputs)
+        with self._lock:
+            inc = self.incidents.get(iid)
+            if inc is None:
+                return None
+            if not inc.closed and inc.role_of(speaker) == "주변인":      # 그 사이 역할이 바뀌었으면 적용하지 않는다
+                b = self._by(inc, speaker)
+                if b.stage != "unseen":
+                    self._apply_label(inc, b, label, now if fixed_now else time.time(), src)
+            return inc.to_dict()
 
     # ------------------------------------------------------------------ public: app events
     def on_event(self, ev: dict, now: Optional[float] = None) -> list:
@@ -411,6 +436,8 @@ class BystanderTracker:
         was = inc.victim_confirmed
         inc.victim_confirmed = was or inc.victim_rank >= VICTIM_CONFIRM_RANK \
             or attr.get("victim_support") == "strong"
+        if inc.victim_confirmed:                       # 본인의 항의로 확정된 피해자도 이름 지목과 같은 세기
+            inc.victim_rank = max(inc.victim_rank, VICTIM_CONFIRM_RANK)
         return inc.victim_confirmed and not was
 
     def _update_victim(self, room: str, inc: Incident, attr: dict, aggr: set, now: float):
@@ -434,7 +461,10 @@ class BystanderTracker:
         else:
             inc._cand, inc._cand_streak, inc._cand_rank, inc._cand_reason = v, 1, rank, reason
         strong = attr.get("victim_support") == "strong"
-        if inc.victim in aggr or inc._cand_rank > inc.victim_rank:
+        if strong:
+            inc._cand_rank = max(inc._cand_rank, VICTIM_CONFIRM_RANK)
+        # 지금 피해자가 가해자로 판정되면 바로 바꾸되, 이미 확정된 피해자는 그것만으로 바꾸지 않는다
+        if (inc.victim in aggr and not inc.victim_confirmed) or inc._cand_rank > inc.victim_rank:
             need = 1
         elif inc._cand_rank == inc.victim_rank:
             need = VICTIM_SWITCH_SAME
@@ -447,6 +477,8 @@ class BystanderTracker:
         inc.victim, inc.victim_reason, inc.victim_rank = v, inc._cand_reason, inc._cand_rank
         inc.victim_verdicts = streak
         inc.victim_confirmed = inc.victim_rank >= VICTIM_CONFIRM_RANK or strong
+        if inc.victim_confirmed:
+            inc.victim_rank = max(inc.victim_rank, VICTIM_CONFIRM_RANK)
         inc._cand, inc._cand_streak, inc._cand_rank, inc._cand_reason = None, 0, 0, None
         inc.aggressors.discard(v)
         was_bystander = inc.bystanders.pop(v, None)
@@ -515,11 +547,16 @@ class BystanderTracker:
         b.nudges += 1
         self._queue(inc.room_id, inc, b, kind, now, payload)
 
-    def _apply_label(self, inc: Incident, b: Bystander, label: Optional[str], now: float):
+    def _apply_label(self, inc: Incident, b: Bystander, label: Optional[str], now: float, src: str = "391"):
+        """src: 'LLM' | '규칙'(LLM이 꺼져 있거나 답하지 못함) | '391'(/analyze가 준 값)"""
         if label == "방어":
-            self._defend(inc, b, now, "발화(391)")
+            self._defend(inc, b, now, f"발화({src})")
         elif label == "동조":
-            self._join(inc, b, now, "발화(391)", cancellable=False)
+            self._join(inc, b, now, f"발화({src})", cancellable=False)
+        elif label not in UNRELATED_LABELS:
+            note = f"발화 판정: {label or '없음'}({src})"            # 판정이 돌았다는 기록. 타이머는 그대로 돈다
+            if not b.history or b.history[-1]["event"] != note:
+                b.log(now, note)
         elif label in UNRELATED_LABELS:
             b.log(now, "무관한 대화")
             if b.stage == "observing":
@@ -545,24 +582,38 @@ class BystanderTracker:
         b.log(now, f"동조: {source}")
         self._queue(inc.room_id, inc, b, "join_feedback", now, {"cancel_window_sec": REACTION_CANCEL_SEC if cancellable else 0})
 
-    def _classify(self, inc: Incident, req: dict, speaker: str) -> Optional[str]:
+    def _classify_inputs(self, inc: Incident, req: dict, speaker: str) -> tuple:
+        """잠금 안에서: 판정에 필요한 것만 뽑아 둔다 (역할 표시가 붙은 맥락, 본문, 바로 앞 발화자가 가해자인지)."""
         ctx = req.get("context", [])[-CONTEXT_TURNS:]
         tag = lambda c: f"{c}({inc.role_of(c)})"
-        turns = [(tag(m["participant_code"]), m.get("text", "")) for m in ctx]
-        text = req["new_message"].get("text", "")
+        turns = [(tag(m["participant_code"]), m.get("text") or "") for m in ctx]
+        text = req["new_message"].get("text") or ""
+        prev = next((m["participant_code"] for m in reversed(ctx) if m["participant_code"] != speaker), None)
+        return turns, tag(speaker), text, prev in inc.aggressors
+
+    def _run_classifier(self, turns, tagged_speaker, text, prev_is_aggressor) -> tuple:
+        """잠금 밖에서: (label, 출처). LLM이 답하지 못하면(None·예외) 키워드 규칙으로 대신 판정한다."""
         if self.classify is not None:
             try:
-                return self.classify(turns, tag(speaker), text)
+                label = self.classify(turns, tagged_speaker, text)
+                if label:
+                    return label, "LLM"
             except Exception as e:
                 print("[bystander] classifier error:", e)
-                return None
-        # heuristic fallback (no LLM): conservative
-        if _DEFEND_RE.search(text):
+        return self._heuristic(text, prev_is_aggressor), "규칙"
+
+    @staticmethod
+    def _heuristic(text: str, prev_is_aggressor: bool) -> str:
+        """LLM 없이: 보수적인 낱말 규칙. 말리거나 항의하는 말 -> 방어, 가해자 바로 뒤의 맞장구·웃음·무마 -> 동조."""
+        st = _stance(text)
+        if st in ("protest", "defend") or (st == "neutral" and _DEFEND_RE.search(text)):
             return "방어"
-        prev = ctx[-1]["participant_code"] if ctx else None
-        if _AGREE_RE.search(text) and prev in inc.aggressors:
+        if prev_is_aggressor and (st in ("agree", "dismiss") or _AGREE_RE.search(text)):
             return "동조"
         return "비해당"          # no change; the silence timer keeps running
+
+    def _classify(self, inc: Incident, req: dict, speaker: str) -> Optional[str]:
+        return self._run_classifier(*self._classify_inputs(inc, req, speaker))[0]
 
     def _queue(self, room: str, inc: Incident, b: Optional[Bystander], action: str, now: float,
                payload: Optional[dict] = None):

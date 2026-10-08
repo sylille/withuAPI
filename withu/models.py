@@ -47,8 +47,9 @@ def load_context_scorer(model_dir=PHASE2_DIR):
     mdl = mdl.to(dev).eval()
 
     @torch.no_grad()
-    def score(window_texts) -> float:
-        text = _render_window(window_texts)
+    def score(window_texts, speakers=None) -> float:
+        # v0.3.3: 학습 때와 같이 발화자를 A/B/C로 구분해 넘긴다 (예전에는 모두 "A:"로 들어갔다)
+        text = _render_window(window_texts, speakers)
         enc = tok(text, return_tensors="pt", truncation=True, max_length=256).to(dev)
         return float(torch.softmax(mdl(**enc).logits, dim=-1)[0, 1])
     return score

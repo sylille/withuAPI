@@ -23,13 +23,16 @@ from .bystander_api import router as bystander_router, tracker
 from .target_resolver import set_request_context 
 from . import models
 
-app = FastAPI(title="WithU Talk AI 추론 서버", version="0.3.0")
+app = FastAPI(title="WithU Talk AI 추론 서버", version="0.3.3")
+_llm = None            # phase4_bystander 모듈 (ENABLE_BYSTANDER=1일 때)
 app.include_router(bystander_router)
 _ensemble: Ensemble | None = None
 
 
 def _load_classify_bystander():
     """Module D: withu/phase4_bystander.py (must sit next to this app.py)."""
+    global _llm
+    from . import phase4_bystander as _llm
     from .phase4_bystander import classify_bystander, PROVIDER, MODEL
     print(f"[bystander] Module D loaded: {PROVIDER} / {MODEL}")
     return classify_bystander
@@ -44,9 +47,12 @@ def build_ensemble() -> Ensemble:
     bystander_fn = None
     if os.environ.get("ENABLE_BYSTANDER") == "1":
         classify_bystander = _load_classify_bystander()
-        bystander_fn = models.load_bystander_fn(classify_bystander)
-        # the 방관 tracker uses the same LLM for bystanders' own messages (방어/동조/무관 대화)
-        tracker.set_classifier(lambda ctx, spk, txt: classify_bystander(ctx, spk, txt)[0])
+        # v0.3.3: LLM은 방관 판정부만 부른다 (사건이 열린 방에서 주변인이 말했을 때, 전송 후 호출에서만).
+        # 예전에는 cb_score가 0.75 이상이면 전송 전 호출에서도, 가해자의 메시지에도 LLM을 불렀다.
+        def _classify(ctx, spk, txt):
+            label, why = classify_bystander(ctx, spk, txt)
+            return None if str(why).startswith("(error") else label     # None -> 판정부가 키워드 규칙으로 대신 판정
+        tracker.set_classifier(_classify)
     # without ENABLE_BYSTANDER the tracker falls back to a conservative keyword heuristic
 
     return Ensemble(
@@ -64,7 +70,7 @@ def _window_scores(req: dict) -> list:
     now = time.time()
     out = []
     for m in req.get("context", []) + [req["new_message"]]:
-        raw = float(_ensemble.message_scorer(m.get("text") or ""))
+        raw = _ensemble.score_message(m.get("text"))
         cb, _, _ = prosocial_guard(m.get("text") or "", raw,
                                    is_defense_action=bool(m.get("is_defense_action", False)))
         out.append({"message_id": m.get("message_id"), "speaker": m["participant_code"],
@@ -82,12 +88,23 @@ def _startup():
     global _ensemble
     _ensemble = build_ensemble()
     tracker.start_background(interval=1.0)     # fires the 30 s / 60 s timers
+    if _llm is not None:                       # LLM이 실제로 답하는지 한 번 확인 (시작을 막지 않게 따로 돌린다)
+        import threading
+        threading.Thread(target=_llm.self_check, name="llm-self-check", daemon=True).start()
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "ensemble_ready": _ensemble is not None,
-            "bystander_tracker": tracker._thread is not None and tracker._thread.is_alive()}
+    out = {"status": "ok", "version": app.version, "ensemble_ready": _ensemble is not None,
+           "bystander_tracker": tracker._thread is not None and tracker._thread.is_alive()}
+    # v0.3.3: 모듈 D(LLM) 상태. "ok" | "error"(bystander_llm_error에 이유) | "unknown"(아직 호출 전) | "off"
+    if _llm is None:
+        out["bystander_llm"] = "off"
+    else:
+        out["bystander_llm"] = _llm.STATUS["state"]
+        if _llm.STATUS["error"]:
+            out["bystander_llm_error"] = _llm.STATUS["error"]
+    return out
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)

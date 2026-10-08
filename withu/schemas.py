@@ -3,6 +3,7 @@
 Privacy: identifiers are pseudonymous `participant_code`s only — no real names, phone
 numbers, or school names should ever be sent (per the design doc's minimum-info rule).
 
+v0.3.3: + Message.has_image. text는 ""도 받는다 (본문 없는 이미지). null이 와도 ""로 본다.
 v0.3.0: + message_id, track_bystander, incident_id, bystander_state (방관행동 판정부)
         + attribution / suppressed / guard_reason declared so they are no longer dropped
 """
@@ -12,13 +13,14 @@ from pydantic import BaseModel, Field
 
 class Message(BaseModel):
     participant_code: str = Field(..., description="pseudonymous speaker id (NOT a real name)")
-    text: str = ""
+    text: Optional[str] = ""
     timestamp: Optional[str] = None
     message_id: Optional[str] = None                # NEW: lets reactions / read receipts point at messages
     read_by_count: Optional[int] = None            # for exclusion / 방관 signals
     response_latency_sec: Optional[float] = None    # seconds until this speaker responded
     is_defense_action: bool = False
     reply_to_message_id: Optional[str] = None
+    has_image: bool = False                         # v0.3.3: context 안의 이미지 메시지 표시 (new_message는 요청의 has_image도 가능)
 
 class Participant(BaseModel):
     participant_code: str

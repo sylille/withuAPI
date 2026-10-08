@@ -40,6 +40,20 @@ v0.3.2 — 방향(누가 누구를) 오류 수정
   말이라, 저항 표현을 필수로 하지는 않았다 (필수로 하려면 WITHU_REPEAT_MIN_PROTEST=1 이상).
   이미지 메시지(has_image) 뒤에 다른 아이가 항의하면 그 이미지도 공격으로 센다.
 
+v0.3.3 — 앱팀 2차 보고(사후·추수검사 대본 8편, 사용성 평가 대본) 반영
+  (1) 항의 표현 보강: 저장하지 마, 놀리지 마, 안 귀여워, 웃기지 않아, 싫어 …
+  (2) 항의한 아이 보호(protester guard): 이미 항의한 적이 있고 욕설·비하 낱말을 쓴 적이 없는 아이의 말은
+      모듈 A 점수가 높아도 공격으로 세지 않고 항의로 본다. 목록에 없는 항의("하나도 안 귀여워")가
+      공격으로 세어져 피해자가 가해자로 바뀌던 문제를 막는다.
+  (3) 항의한 아이가 둘 이상이면 먼저, 더 많이 항의한 아이가 피해자다. 나머지의 항의는 말리기(defend)로 본다.
+      "본인이 싫으면 그만해야지", "서아가 싫다잖아" 같은 3인칭 표현은 처음부터 말리기다.
+  (4) victim_support=strong 은 '피해자 본인의 항의 메시지 2개 이상'으로 센다 (예전: 항의가 뒤따른 공격 2개 이상).
+      항의 메시지는 가해자의 말(공격으로 세어지지 않은 말 포함) 뒤 3개 안에 있으면 센다.
+  (5) 이름·답장으로 지목된 아이나 항의한 아이가 있으면, 공격 뒤에 평범하게 말했을 뿐인 아이는 피해자 후보에서 뺀다.
+      다른 아이 이야기를 하는 말("걔 또 그러네", "도현이 진짜 왜 그래")은 피해자 근거로 세지 않는다.
+  (6) 배제 발화 규칙: 명단의 이름 + 배제 표현("재희는 빼고", "도현이 부르지 마")은 공격으로 세고 그 아이를 지목한 것으로 본다.
+      모듈 C(배제)가 꺼져 있어도 배제 대본에서 사건이 열린다. WITHU_ENABLE_EXCLUSION_RULE=0 으로 끈다.
+
 연동
   schemas.py     : AnalyzeRequest에 participants, Message에 reply_to_message_id 추가
   app.py         : /analyze 첫 줄에 set_request_context(req)
@@ -87,6 +101,15 @@ RESIST_CAP          = _env("WITHU_RESIST_CAP", 0.30)        # 항의 발화의 �
 PSEUDO_CB           = _env("WITHU_PSEUDO_CB", 0.60)         # 무마 발화·이미지에 주는 점수
 REPEAT_MIN_PROTEST  = _env("WITHU_REPEAT_MIN_PROTEST", 0, int)  # 반복 표적: 꼭 있어야 하는 '저항' 반응 수 (0 = 필수 아님)
 W_PROTEST_REPLY     = _env("WITHU_PROTEST_REPLY_WEIGHT", 3.0)   # 저항 반응 1번의 점수 (그 밖의 반응은 2, 맞장구는 -2)
+# v0.3.3
+ENABLE_PROTESTER_GUARD = os.environ.get("WITHU_ENABLE_PROTESTER_GUARD", "1") != "0"  # 항의한 아이의 말은 공격으로 세지 않음
+ENABLE_EXCLUSION_RULE  = os.environ.get("WITHU_ENABLE_EXCLUSION_RULE", "1") != "0"   # 이름 + 배제 표현을 공격으로 셈
+STRONG_MIN_PROTESTS    = _env("WITHU_STRONG_MIN_PROTESTS", 2, int)   # victim_support=strong 에 필요한 본인 항의 메시지 수
+W_SOFT_MENTION         = _env("WITHU_SOFT_MENTION_WEIGHT", 0.0)      # 공격이 아닌 말에서 제3자로 이름이 불린 경우 (기본 꺼짐: 코퍼스에서 오판이 늘었음)
+PREFER_BACKED          = os.environ.get("WITHU_PREFER_BACKED", "1") != "0"      # 지목·항의 근거가 있는 후보를 먼저 봄
+BACKED_BY_PROTEST      = os.environ.get("WITHU_BACKED_BY_PROTEST", "0") != "0"  # 항의한 아이도 '근거 있는 후보'로 침
+PRIMARY_PROTESTER      = os.environ.get("WITHU_PRIMARY_PROTESTER", "1") != "0"  # 항의한 아이가 여럿이면 당사자 1명만
+SKIP_THIRD_PERSON      = os.environ.get("WITHU_SKIP_THIRD_PERSON", "1") != "0"  # 남 얘기하는 반응은 피해자 근거에서 뺌
 
 # ----------------------------------------------------- per-request context ---
 _CTX: contextvars.ContextVar[dict] = contextvars.ContextVar("withu_target_ctx", default={})
@@ -248,24 +271,61 @@ _HOSTILE = ("시발", "씨발", "ㅅㅂ", "ㅆㅂ", "병신", "ㅂㅅ", "새끼"
             "죽어", "죽을", "죽는", "죽인", "닥쳐", "닥치", "ㄷㅊ", "존나", "ㅈㄴ", "개새", "애미", "좆", "역겨", "역겁",
             "찐따", "냄새", "돼지", "못생", "쓰레기", "나가라", "한심", "멍청", "등신", "재수")
 _LAUGH = re.compile(r"[ㅋᄏ]{2,}|[ㅎᄒ]{2,}|ㅋ\s*$")
-_PROTEST = re.compile(
+# 분명한 항의: 그만하라·지우라는 요구, 싫다는 말, 왜 나한테 그러느냐는 말
+_PROTEST_HARD = re.compile(
     r"(?<![가-힣ㄱ-ㅎ])하지\s*(?:마|말라|말아|말랬)"          # 하지마, 하지 말라고  (말하지마·'하지 말고'는 아님)
     r"|그만\s*(?:해|하|좀|둬|두)|그만\s*[!.~]*\s*$"
     r"|지워|지우라|삭제\s*해|내려\s*(?:줘|달|주)|올리지\s*마|찍지\s*마|보내지\s*마|퍼뜨리지\s*마|캡처\s*하지\s*마"
-    r"|왜\s*(?:계속\s*|자꾸\s*|맨날\s*)?나만|왜\s*(?:계속\s*|자꾸\s*)?나한테|나한테\s*왜|내가\s*(?:뭘|왜)|내가\s*뭐\s*(?:했|잘못)"
-    r"|왜\s*그래|왜\s*그러"
-    r"|싫다고|하기\s*싫|기분\s*나[빠쁘]|속상|상처|억울|창피|무서|괴롭"
+    # v0.3.3: '○○하지 마' (말하지 마·부르지 마는 가해자도 쓰므로 넣지 않는다)
+    r"|(?:저장|공유|캡[처쳐]|전달|유포|복사|편집|합성)\s*하지\s*(?:마|말라|말아|말랬)"
+    r"|(?:놀리|웃|비웃|퍼\s*가|퍼\s*나르|돌리|보여\s*주|따라\s*하|건드리|괴롭히)지\s*(?:마|말라|말아|말랬)"
+    r"|(?:하나도\s*)?안\s*(?:귀여|귀엽|웃[기겨])|웃기지\s*않|귀엽지\s*않|안\s*웃긴"
+    r"|싫어(?![하해])|싫거든|싫단\s*말|싫음|싫다고|하기\s*싫"
+    r"|왜\s*(?:계속\s*|자꾸\s*|맨날\s*)?나만|왜\s*(?:계속\s*|자꾸\s*)?나한테|나한테\s*왜|내가\s*(?:뭘|왜)|내가\s*뭐\s*(?:했|잘못)")
+# 약한 신호: 속상함·사과·호소. 가해자 쪽도 흔히 쓰는 말이라 항의로는 세되 '분명한 항의'로는 보지 않는다
+_PROTEST_SOFT = re.compile(
+    r"왜\s*그래|왜\s*그러"
+    r"|기분\s*나[빠쁘]|속상|상처|억울|창피|무서|괴롭"
     r"|ㅠ|ㅜ|흑흑|제발|선생님|쌤한테|신고|미안|잘못했|죄송")
+
+
+class _Either:
+    """_PROTEST.search(t) — 분명한 항의 또는 약한 신호."""
+    @staticmethod
+    def search(t):
+        return _PROTEST_HARD.search(t) or _PROTEST_SOFT.search(t)
+
+
+_PROTEST = _Either()
+
+
+def is_hard_protest(text: str) -> bool:
+    return stance(text) == "protest" and bool(_PROTEST_HARD.search(text or ""))
+
+
 # 남의 일을 말리는 말 (주변인의 방어). 1인칭 표현이 같이 있으면 본인의 항의로 본다.
 _MEDIATE = re.compile(
     r"싸우지\s*마|그만\s*싸워|싸움|진정|너무\s*심|심했|심하잖|심한\s*거|너무하|얘들아|애들아|니네|너네|너희"
-    r"|걔한테|쟤한테|[가-힣]{2,4}(?:이|)한테\s*(?:왜|그러지|그만|뭐라)")
+    r"|걔한테|쟤한테|[가-힣]{2,4}(?:이|)한테\s*(?:왜|그러지|그만|뭐라)"
+    # v0.3.3: 남의 일로 말하는 표현 (3인칭·당위·청유)
+    r"|본인(?:이|은|도|한테)|(?:걔|쟤|얘)(?:가|는|도)\s*싫|싫어하잖|싫다잖|싫대|싫다는데|싫다고\s*하잖|싫다\s*하잖"
+    r"|그만해야|하지\s*말아야|지워야|지워\s*줘라|사과해|사과\s*하[라자]|그러면\s*안\s*[되돼]|그러는\s*거\s*아니"
+    r"|아닌\s*[것거]\s*같|그만하자|하지\s*말자|보내지\s*말자|올리지\s*말자")
 _FIRST_PERSON = re.compile(r"(?<![가-힣])(?:나만|나한테|나를|나도|내가|내\s|나\s|날\s|저한테)")
 _DISMISS = re.compile(
     r"장난인데|장난이잖|장난\s*(?:인|이)\s*거|장난도\s*못|농담인데|웃자고"
     r"|왜\s*화\s*[내냄났남]|화났어\s*\?|화났냐|삐[졌짐쳤지]|예민|오바|진지충|진지\s*빨"
     r"|뭘\s*그런\s*걸|그걸\s*가지고|별것도\s*아닌|찡찡|징징")
-_AGREE = re.compile(r"ㅇㅈ|인정|팩트|ㄹㅇ|레알|맞아|맞네|맞는\s*말|그니까|그러니까|내\s*말이|동의|ㄱㅇㄷ|개웃|웃기|웃겨")
+_AGREE = re.compile(r"ㅇㅈ|인정|팩트|ㄹㅇ|레알|맞아|맞네|맞는\s*말|그니까|그러니까|그러게|그치(?!만)|내\s*말이|동의|ㄱㅇㄷ|개웃|웃기|웃겨")
+# v0.3.3: 그 자리에 없는/말하지 않는 아이를 남처럼 부르는 말 ("걔 또 그러네"). 1인칭이 같이 있으면 본인 이야기로 본다.
+_THIRD_PERSON = re.compile(r"(?<![가-힣])(?:걔|쟤|얘|그\s*애|저\s*애)(?:는|가|도|랑|한테|를|네|\s|$)")
+# v0.3.3: 배제 표현. 명단의 이름(말한 아이 본인 제외)과 같은 메시지에 있을 때만 공격으로 센다.
+_EXCLUDE = re.compile(
+    r"빼자|뺄까|빼\s*버리|빼야|빼고(?:\s*\S+){0,2}?\s*(?:하자|놀자|가자|만들자|만들까|만들어|파자|할래|할까|모이자|초대|우리끼리)"
+    r"|(?:은|는)\s*빼고|빼고\s*[ㅋㅎ~!.\s]*$"
+    r"|부르지\s*마|부르지\s*말자|초대\s*하지\s*마|초대\s*하지\s*말자|끼워\s*주지\s*마|껴\s*주지\s*마|안\s*끼워|끼지\s*마"
+    r"|(?:랑|이랑|하고)\s*(?:놀지|말하지|얘기하지)\s*(?:마|말자)|말\s*걸지\s*(?:마|말자)|상대\s*하지\s*(?:마|말자)"
+    r"|한테(?:는|도)?\s*(?:말하지|알리지)\s*(?:마|말자)|없는\s*(?:방|단톡|톡방)|무시\s*하자|무시해\s*버려|투명\s*인간")
 
 
 def stance(text: str) -> str:
@@ -287,8 +347,32 @@ def stance(text: str) -> str:
     return "neutral"
 
 
-def prepare(items: list[dict], pseudo: bool = True) -> list[dict]:
-    """성격 표시 + 저항 가드 + (선택) 무마 발화·이미지를 공격으로 표시. 원본은 건드리지 않는다."""
+def _named(text: str, roster: Optional[dict], skip=()) -> list:
+    """명단에서 이 메시지에 이름이 나온 아이들의 코드."""
+    if not roster or not text:
+        return []
+    return [c for c, pat in roster.items() if c not in skip and pat is not None and pat.search(text)]
+
+
+def _excl_target(text: str, roster: Optional[dict], skip=()) -> list:
+    """배제 표현이 가리키는 아이: 표현 바로 앞에서 불린 이름 하나 ("지민아 도현이는 빼고 하자" -> 도현). 없으면 뒤의 이름."""
+    m = _EXCLUDE.search(text or "")
+    if not m or not roster:
+        return []
+    before, after = [], []
+    for c, pat in roster.items():
+        if c in skip or pat is None:
+            continue
+        for nm in pat.finditer(text):
+            (before if nm.start() <= m.start() else after).append((nm.start(), c))
+    if before:
+        return [max(before)[1]]
+    return [min(after)[1]] if after else []
+
+
+def prepare(items: list[dict], pseudo: bool = True, roster: Optional[dict] = None) -> list[dict]:
+    """성격 표시 + 저항 가드 + 항의한 아이 보호 + (선택) 무마 발화·이미지·배제 발화를 공격으로 표시.
+    원본은 건드리지 않는다. 낮추는 가드는 항상, 올리는 표시는 pseudo=True 일 때만 적용한다."""
     out = []
     for it in items:
         d = dict(it)
@@ -297,13 +381,52 @@ def prepare(items: list[dict], pseudo: bool = True) -> list[dict]:
         if ENABLE_RESIST_GUARD and d["st"] in ("protest", "defend") and cb >= TOX_THRESHOLD:
             d["cb_raw"], d["cb"], d["note"] = cb, min(cb, RESIST_CAP), "resistance_guard"
         out.append(d)
+
+    # v0.3.3 항의한 아이 보호: 이미 항의했고 욕설·비하 낱말을 쓴 적 없는 아이의 '그 밖의 말'은
+    # 점수가 높아도 공격이 아니라 항의로 본다 ("하나도 안 귀여워", "웃기지 않아" 처럼 목록에 없는 항의).
+    # 조건이 좁다: 그 아이의 첫 항의가 (a) 본인이 공격하기 전이고 (b) 다른 아이의 공격·이미지 바로 뒤(3개 안)여야 한다.
+    # 가해자도 "그만해"라고 말하기 때문에, 먼저 공격한 아이나 아무 일 없이 "하지마"라고 한 아이는 보호하지 않는다.
+    if ENABLE_PROTESTER_GUARD and ENABLE_RESIST_GUARD:
+        hostile = {d["speaker"] for d in out if d["st"] == "hostile"}
+        posted_img = {d["speaker"] for d in out if d.get("img")}
+        attacked: set = set()           # 지금까지 공격(점수 기준)을 한 아이
+        protected: set = set()
+        for i, d in enumerate(out):
+            who = d["speaker"]
+            cb = float(d.get("cb") or 0.0)
+            if d["st"] == "protest":
+                if _PROTEST_HARD.search(d.get("text") or "") and who not in attacked and who not in hostile \
+                        and who not in posted_img and any(
+                        o["speaker"] != who and (o.get("img") or float(o.get("cb") or 0.0) >= TOX_THRESHOLD)
+                        for o in out[max(0, i - REPEAT_REPLY_SPAN):i]):
+                    protected.add(who)
+            elif cb >= TOX_THRESHOLD:
+                if d["st"] == "neutral" and who in protected:
+                    d["cb_raw"], d["cb"], d["note"] = cb, min(cb, RESIST_CAP), "protester_guard"
+                    d["st"] = "protest"
+                else:
+                    attacked.add(who)
     if not (pseudo and ENABLE_PSEUDO):
         return out
+
     n = len(out)
+    last_excl = None                      # (index, [지목된 코드]) — 바로 앞의 이름 있는 배제 발화
     for i, d in enumerate(out):
+        who = d["speaker"]
+        # v0.3.3 배제 발화: 이름 + 배제 표현. 이름 없이 "걔 빼자"로 이어 받으면 같은 아이를 가리킨 것으로 본다.
+        if ENABLE_EXCLUSION_RULE and roster and d["st"] not in ("protest", "defend") \
+                and _EXCLUDE.search(d.get("text") or ""):
+            named = _excl_target(d.get("text"), roster, skip=(who,))
+            if not named and last_excl and i - last_excl[0] <= REPEAT_REPLY_SPAN:
+                named = list(last_excl[1])
+            if named:
+                d["excl"] = named
+                last_excl = (i, named)
+                if float(d.get("cb") or 0.0) < TOX_THRESHOLD:
+                    d["cb_raw"], d["cb"], d["note"] = d.get("cb"), PSEUDO_CB, "exclusion_talk"
+                continue
         if float(d.get("cb") or 0.0) >= TOX_THRESHOLD:
             continue
-        who = d["speaker"]
         if d["st"] == "dismiss" and any(o["st"] in ("protest", "defend") and o["speaker"] != who
                                         for o in out[max(0, i - REPEAT_REPLY_SPAN):i]):
             d["cb_raw"], d["cb"], d["note"] = d.get("cb"), PSEUDO_CB, "dismissal_after_protest"
@@ -352,11 +475,12 @@ W_EXPLICIT_T, W_MENTION_T, W_REPLY_T = 6.0, 3.0, 2.0
 
 def resolve_target(items, roster, meta_by_mid) -> Optional[dict]:
     """
-    피해자 후보마다 세 신호를 합산해 한 명을 고른다 (기록 전체 기준).
+    피해자 후보마다 신호를 합산해 한 명을 고른다 (기록 전체 기준).
       explicit : 공격 메시지가 답장(reply_to)으로 가리킨 메시지의 발신자      × 6
-      mention  : 공격 메시지에 이름(display_name/aliases)이 나온 횟수        × 3
-      reply    : 공격 바로 뒤(3메시지 안)에 반응한 공격 수                    × 2
-                 '저항' 반응은 × 3, 맞장구·웃음은 × −2 (가해자 편으로 봄)
+      mention  : 공격 메시지에 이름(display_name/aliases)이 나온 횟수        × 3  (배제 발화가 가리킨 아이 포함)
+      protest  : 가해자의 말 뒤(3메시지 안)에 그 아이가 항의한 메시지 수      × 3
+      reply    : 공격 바로 뒤(3메시지 안)에 평범하게 반응한 공격 수            × 2,  맞장구·웃음은 × −2 (가해자 편)
+      soft     : 공격이 아닌 말에서 제3자로 이름이 불린 횟수                  × 1.5 ("서아가 싫다잖아", "도현이 또 그러네")
     이름이 나왔다고 무조건 피해자가 아니다 ("우웅아 쟤 봐 ㅋㅋ 역겨워"는 같은 편을 부른 것).
     그래서 반응 패턴과 합산하고, 가장 강한 근거를 victim_reason으로 돌려준다.
     """
@@ -364,44 +488,89 @@ def resolve_target(items, roster, meta_by_mid) -> Optional[dict]:
     if not aggressors:
         return None
     aset = set(aggressors)
-    explicit, mention, reply, weak, ally = Counter(), Counter(), {}, {}, {}
     items = [it if "st" in it else {**it, "st": stance(it.get("text"))} for it in items]
+    n = len(items)
+    first_attack = next((i for i, it in enumerate(items)
+                         if it["speaker"] in aset and (it.get("cb") or 0) >= TOX_THRESHOLD), n)
+
+    # ---- 1) 항의 메시지: 가해자의 말(공격으로 세어지지 않은 말 포함) 뒤 3개 안에서 가해자가 아닌 아이가 한 항의
+    prot_msgs: dict = {}                                         # code -> [메시지 위치]
+    for j in range(first_attack + 1, n):
+        it = items[j]
+        if it["st"] != "protest" or it["speaker"] in aset:
+            continue
+        if any(o["speaker"] in aset for o in items[max(0, j - REPEAT_REPLY_SPAN):j]):
+            prot_msgs.setdefault(it["speaker"], []).append(j)
+    # 항의한 아이가 둘 이상이면: 먼저, 더 많이 항의한 아이가 당사자다. 나머지의 항의는 말리기로 본다.
+    mediators: set = set()
+    if PRIMARY_PROTESTER and len(prot_msgs) > 1:
+        primary = max(prot_msgs, key=lambda c: (len(prot_msgs[c]), -prot_msgs[c][0]))
+        for c, idx in prot_msgs.items():
+            if c == primary:
+                continue
+            if len(prot_msgs[primary]) >= 2 * len(idx) or \
+                    (len(prot_msgs[primary]) > len(idx) and prot_msgs[primary][0] < idx[0]):
+                mediators.add(c)
+    for c in mediators:
+        prot_msgs.pop(c)
+    nprot = Counter({c: len(v) for c, v in prot_msgs.items()})
+    nhard = Counter({c: sum(1 for j in v if items[j].get("note") == "protester_guard"
+                            or _PROTEST_HARD.search(items[j].get("text") or "")) for c, v in prot_msgs.items()})
+
+    # ---- 2) 공격 메시지마다: 답장·이름 지목, 그리고 바로 뒤의 반응
+    explicit, mention, soft, excl_target = Counter(), Counter(), Counter(), Counter()
+    weak, ally, answered = {}, {}, {}
     for i, it in enumerate(items):
-        if (it.get("cb") or 0) < TOX_THRESHOLD:
+        text = it.get("text") or ""
+        is_attack = (it.get("cb") or 0) >= TOX_THRESHOLD
+        if not is_attack:
+            # 공격이 아닌 말에서 제3자로 이름이 불림 (말리는 말, 맞장구, 남 얘기). 본인·가해자 이름은 제외
+            if i > first_attack and it["st"] in ("defend", "agree", "neutral") and not _FIRST_PERSON.search(text):
+                for code in _named(text, roster, skip=aset | {it["speaker"]}):
+                    soft[code] += 1
             continue
         rt = it.get("reply_to")
         if rt and rt in meta_by_mid:
             tgt = meta_by_mid[rt].get("speaker")
             if tgt and tgt not in aset:
                 explicit[tgt] += 1
-        text = it.get("text") or ""
-        for code, pat in roster.items():
-            if code not in aset and pat is not None and pat.search(text):
-                mention[code] += 1
+        excl = {c for c in (it.get("excl") or []) if c not in aset}
+        for code in set(_named(text, roster, skip=aset)) | excl:
+            mention[code] += 1
+        for code in excl:
+            excl_target[code] += 1
         if it["speaker"] in aset:
-            for j in range(i + 1, min(len(items), i + 1 + REPEAT_REPLY_SPAN)):
-                s = items[j]["speaker"]
+            for j in range(i + 1, min(n, i + 1 + REPEAT_REPLY_SPAN)):
+                o = items[j]
+                s = o["speaker"]
                 if s in aset:
                     continue
-                st = items[j]["st"]
-                if st == "protest":
-                    reply.setdefault(s, set()).add(i)
-                elif st in ("agree", "dismiss") or is_playful(items[j].get("text")):
-                    ally.setdefault(s, set()).add(i)         # 공격에 맞장구 = 가해자 편
-                elif st == "defend":
-                    continue                                 # 말리는 말 = 주변인의 방어. 피해자 근거로 세지 않음
+                st = o["st"]
+                if st == "protest" and s not in mediators:
+                    answered.setdefault(s, set()).add(i)         # 항의는 위에서 메시지 수로 셌다
+                elif st in ("agree", "dismiss") or is_playful(o.get("text")):
+                    ally.setdefault(s, set()).add(i)             # 공격에 맞장구 = 가해자 편
+                elif st in ("defend", "protest"):
+                    continue                                     # 말리는 말 = 주변인의 방어. 피해자 근거로 세지 않음
+                elif SKIP_THIRD_PERSON and (_THIRD_PERSON.search(o.get("text") or "") or _named(o.get("text"), roster, skip=aset | {s})) \
+                        and not _FIRST_PERSON.search(o.get("text") or ""):
+                    continue                                     # 다른 아이 이야기를 하는 말 = 본인이 표적이 아님
                 else:
                     weak.setdefault(s, set()).add(i)
-    nprot = Counter({k: len(v) for k, v in reply.items()})
-    nweak = Counter({k: len(v - reply.get(k, set())) for k, v in weak.items()})
-    nally = Counter({k: len(v - reply.get(k, set()) - weak.get(k, set())) for k, v in ally.items()})
-    # 반응 수 = 저항 + 그 밖의 반응 − 맞장구. 0 이하면 반응만으로는 피해자 후보가 아니다 (이름·답장 지목은 유효)
+    nweak = Counter({k: len(v - answered.get(k, set())) for k, v in weak.items()})
+    nally = Counter({k: len(v - answered.get(k, set()) - weak.get(k, set())) for k, v in ally.items()})
+    # 반응 수 = 항의 + 그 밖의 반응 − 맞장구. 0 이하면 반응만으로는 피해자 후보가 아니다 (이름·답장 지목은 유효)
     nrep = Counter({c: nprot[c] + nweak[c] - nally[c] for c in set(nprot) | set(nweak)})
-    nrep = Counter({c: n for c, n in nrep.items() if n > 0})
+    nrep = Counter({c: v for c, v in nrep.items() if v > 0})
     cands = set(explicit) | set(mention) | set(nrep)
+    # 지목됐거나 항의한 아이가 있으면, 공격 뒤에 평범하게 말했을 뿐인 아이는 후보에서 뺀다
+    # (그냥 이름이 불린 것만으로는 빼지 않는다. 같은 편을 부르는 경우가 많아서 점수로 겨룬다.)
+    backed = {c for c in cands if explicit[c] or excl_target[c] or (BACKED_BY_PROTEST and nprot[c])}
+    if backed and PREFER_BACKED:
+        cands = backed
     if not cands:
         return None
-    score = {c: W_EXPLICIT_T * explicit[c] + W_MENTION_T * mention[c]
+    score = {c: W_EXPLICIT_T * explicit[c] + W_MENTION_T * mention[c] + W_SOFT_MENTION * soft[c]
                 + (max(0.0, W_PROTEST_REPLY * nprot[c] + W_REPLY_T * (nweak[c] - nally[c])) if c in nrep else 0.0)
              for c in cands}
     victim = max(score, key=score.get)
@@ -424,9 +593,41 @@ def resolve_target(items, roster, meta_by_mid) -> Optional[dict]:
         if second and score[victim] < REPEAT_SEPARATION * second:
             return _fail(aggressors, victim, reason, "ambiguous_target")
     out = _judge(items, aggressors, aggr, victim, reason, score, dominance_mode="set")
-    # 근거가 강한가: 답장·이름으로 지목됐거나, 그 아이가 직접 2번 이상 항의했다
-    out["victim_support"] = "strong" if reason in STRONG_REASONS or nprot[victim] >= 2 else "weak"
+    out["victim_support"] = _support(reason, victim, nhard)
+    out["victim_protests"] = nhard[victim]
     return out
+
+
+def _support(reason, victim, nprot) -> str:
+    """근거가 강한가: 답장·이름으로 지목됐거나, 그 아이가 직접 2번 이상 분명하게 항의했고 그만큼 항의한 다른 아이가 없다."""
+    if reason in STRONG_REASONS:
+        return "strong"
+    others = max((v for c, v in nprot.items() if c != victim), default=0)
+    return "strong" if nprot[victim] >= STRONG_MIN_PROTESTS and others * 2 <= nprot[victim] else "weak"
+
+
+def protest_counts(items, aggressors) -> Counter:
+    """가해자가 정해져 있을 때, 가해자의 말 뒤 3개 안에서 다른 아이들이 한 '분명한 항의' 메시지 수 (말리기로 본 항의는 제외)."""
+    r = Counter()
+    aset = set(aggressors or [])
+    first = {}
+    seen_aggr = False
+    for j, it in enumerate(items):
+        if it["speaker"] in aset:
+            seen_aggr = seen_aggr or (it.get("cb") or 0) >= TOX_THRESHOLD
+            continue
+        if seen_aggr and it.get("st") == "protest" and (it.get("note") == "protester_guard"
+                                                        or _PROTEST_HARD.search(it.get("text") or "")) \
+                and any(o["speaker"] in aset
+                                                             for o in items[max(0, j - REPEAT_REPLY_SPAN):j]):
+            r[it["speaker"]] += 1
+            first.setdefault(it["speaker"], j)
+    if PRIMARY_PROTESTER and len(r) > 1:
+        primary = max(r, key=lambda c: (r[c], -first[c]))
+        for c in [c for c in r if c != primary]:
+            if r[primary] >= 2 * r[c] or (r[primary] > r[c] and first[primary] < first[c]):
+                del r[c]
+    return r
 
 
 STRONG_REASONS = ("explicit_target", "name_mention")
@@ -466,20 +667,51 @@ def evaluate_window_v2(window: list[dict], module_b_window=None, *, room_id=None
             if m.get("img"):
                 it["img"] = True
 
-    # 기존 판정에도 저항 가드는 적용한다 (항의가 공격으로 세어져 방향이 뒤집히지 않게)
-    guarded = prepare(window, pseudo=False)
+    hist_raw = HISTORY.merged(room_id, window, commit) if room_id is not None else window
+    # 가드(항의·말리기·항의한 아이 보호)는 방 기록 전체를 보고 정한다. 창(5~10개)만 보면 앞서 한 항의가 안 보인다.
+    guarded = _window_part(prepare(hist_raw, pseudo=False, roster=roster), window) \
+        or prepare(window, pseudo=False, roster=roster)
     base = _orig_evaluate_window(guarded, module_b_window) if module_b_window is not None \
         else _orig_evaluate_window(guarded)
-    hist = HISTORY.merged(room_id, window, commit) if room_id is not None else window
+    hist = prepare(hist_raw, roster=roster)
     if base["is_bullying"]:
-        return {**base, "target_source": "window", "attack_mids": _attack_mids(guarded, base["attr"].aggressors),
-                "victim_support": "strong" if base["attr"].victim_reason in STRONG_REASONS else "weak"}
+        aggr = base["attr"].aggressors
+        nprot = protest_counts(hist, aggr)
+        return {**base, "target_source": "window", "attack_mids": _attack_mids(guarded, aggr),
+                "victim_support": _support(base["attr"].victim_reason, base["attr"].victim, nprot),
+                "victim_protests": nprot[base["attr"].victim]}
 
-    hist = prepare(hist)
     meta_by_mid = {it["mid"]: it for it in hist if it.get("mid")}
     r = resolve_target(hist, roster, meta_by_mid)
     if r and r["is_bullying"]:
         return {**r, "target_source": "room_history" if len(hist) > len(window) else "window",
-                "attack_mids": _attack_mids(hist, r["attr"].aggressors)}
+                "attack_mids": _attack_mids(hist, r["attr"].aggressors),
+                "attack_notes": sorted({it["note"] for it in hist if it.get("note") in
+                                        ("exclusion_talk", "image_then_protest", "dismissal_after_protest")
+                                        and it["speaker"] in set(r["attr"].aggressors)})}
     detail = [f"{r['attr'].victim_reason}:{r['drop_reason']}"] if r else []
     return {**base, "target_source": "window", "drop_detail": detail}
+
+
+def _window_part(prepared_hist: list[dict], window: list[dict]) -> Optional[list]:
+    """방 기록 전체로 가드를 적용한 결과에서 이번 창에 해당하는 메시지들을 창의 순서대로 꺼낸다. 못 맞추면 None."""
+    if len(prepared_hist) < len(window):
+        return None
+    if window and all(it.get("mid") for it in window):
+        by_mid = {it["mid"]: it for it in prepared_hist if it.get("mid")}
+        return [by_mid[it["mid"]] for it in window] if all(it["mid"] in by_mid for it in window) else None
+    tail = prepared_hist[len(prepared_hist) - len(window):]
+    same = all(a["speaker"] == b["speaker"] and (a.get("text") or "") == (b.get("text") or "")
+               for a, b in zip(tail, window))
+    return tail if same else None
+
+
+def message_flags(text: str, speaker: Optional[str] = None, room_id=None) -> dict:
+    """전송 전 경고(cb_score)용: 이 메시지 하나의 성격과 배제 발화 여부. 방 기록은 바꾸지 않는다."""
+    room_id = room_id if room_id is not None else _CTX.get().get("room_id")
+    roster = ROSTERS.get(room_id) if room_id is not None else {}
+    st = stance(text)
+    excl = []
+    if ENABLE_EXCLUSION_RULE and st not in ("protest", "defend") and _EXCLUDE.search(text or ""):
+        excl = _excl_target(text, roster, skip=(speaker,))
+    return {"stance": st, "exclusion_targets": excl}
