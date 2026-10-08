@@ -23,7 +23,7 @@ from .bystander_api import router as bystander_router, tracker
 from .target_resolver import set_request_context, set_exclusion_judge
 from . import models
 
-app = FastAPI(title="WithU Talk AI 추론 서버", version="0.3.4")
+app = FastAPI(title="WithU Talk AI 추론 서버", version="0.3.5")
 _llm = None            # phase4_bystander 모듈 (ENABLE_BYSTANDER=1일 때)
 app.include_router(bystander_router)
 _ensemble: Ensemble | None = None

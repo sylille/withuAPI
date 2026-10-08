@@ -47,6 +47,11 @@ v0.3.3
   * 주변인 발화 판정(LLM)은 잠금 밖에서 한다. 예전에는 LLM을 기다리는 동안 모든 방의 요청과 타이머가 멈췄다.
   * LLM이 답하지 못하면(키 없음·시간 초과 등) 키워드 규칙으로 대신 판정하고, 어느 쪽으로 판정했는지 history에 남긴다.
   * 본인의 항의로 confirmed가 된 피해자는 이름으로 지목된 피해자와 같은 세기로 본다. 약한 근거 한 번으로는 바뀌지 않는다.
+
+v0.3.5
+------
+  * victim_reason에 direct_address(2인칭 지목)가 더해졌다. 세기는 repeated_target과 같고, 본인의 분명한 항의가 더해지면
+    (attribution.victim_support=strong) confirmed가 된다.
 """
 from __future__ import annotations
 
@@ -77,6 +82,7 @@ UNRELATED_LABELS        = {"방관"}  # Module D labels treated as '무관 대�
 CONTEXT_TURNS           = 6       # turns passed to the Module D classifier
 # 피해자 근거의 세기 (클수록 강함)
 VICTIM_RANK = {"explicit_target": 3, "name_mention": 2, "distress_signal": 1, "repeated_target": 1,
+               "direct_address": 1,          # v0.3.5: 2인칭 지목 (이름은 안 나옴). 본인의 항의가 더해지면 confirmed
                "turn_adjacency": 0}
 VICTIM_CONFIRM_RANK     = 2       # 이 세기 이상이면 confirmed (또는 attribution.victim_support == "strong")
 VICTIM_SWITCH_SAME      = int(os.environ.get("BYSTANDER_VICTIM_SWITCH_SAME", 2))       # 같은 세기: 연속 판정 수

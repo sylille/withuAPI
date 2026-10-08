@@ -58,7 +58,7 @@ out = stream("e", [("C011", "하늘색 옷 입은 애 역겨워", TOX), ("C030",
 check("하늘색 is not 하늘", out[-1]["attr"].victim != "C013", out[-1])
 
 # 6. repeated attacks, no names, victim keeps answering -> opens
-conv = [("C013", "나 왔어", OK), ("C011", "너 진짜 냄새나", TOX), ("C013", "왜 그래", OK), ("C030", "ㅋㅋ", OK),
+conv = [("C013", "나 왔어", OK), ("C011", "진짜 냄새나", TOX), ("C013", "왜 그래", OK), ("C030", "ㅋㅋ", OK),
         ("C011", "꺼져 역겨워", TOX), ("C013", "내가 뭘 했는데", OK), ("C011", "나가라 그냥", TOX),
         ("C013", "하지마 ㅠㅠ", OK), ("C011", "말하지마 냄새나", TOX)]
 out = stream("f", conv, win=5)
@@ -66,6 +66,16 @@ first = next((i for i, r in enumerate(out) if r["is_bullying"]), None)
 check("repeated, no names (opens at 4th attack)", first == 8 and out[-1]["attr"].victim == "C013", out[-1])
 check("... reason repeated_target", out[-1]["attr"].victim_reason == "repeated_target", out[-1])
 check("... not opened after only 3 attacks", not out[7]["is_bullying"], out[7])
+
+# 6b. (v0.3.5) same, but the attack addresses the child in the second person ("너 진짜 냄새나") -> direct_address:
+#     opens at the aggressor's 2nd attack once the addressed child has protested; one attack alone does not open
+conv = [("C013", "나 왔어", OK), ("C011", "너 진짜 냄새나", TOX), ("C013", "왜 그래", OK), ("C030", "ㅋㅋ", OK),
+        ("C011", "꺼져 역겨워", TOX), ("C013", "내가 뭘 했는데", OK)]
+out = stream("f2", conv, win=5)
+first = next((i for i, r in enumerate(out) if r["is_bullying"]), None)
+check("second-person attack + protest (opens at 2nd attack)", first == 4 and out[-1]["attr"].victim == "C013", out[-1])
+check("... reason direct_address", out[-1]["attr"].victim_reason == "direct_address", out[-1])
+check("... not opened after a single attack", not out[2]["is_bullying"], out[2])
 
 # 7. same pattern but the 'victim' only laughs -> banter, no incident
 conv = [("C011", "야 꺼져 ㅋㅋ", TOX), ("C013", "ㅋㅋㅋㅋ", OK), ("C011", "병신아 ㅋㅋ", TOX), ("C013", "ㅋㅋㅋㅋㅋ 인정", OK),
