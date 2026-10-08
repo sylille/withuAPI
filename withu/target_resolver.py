@@ -54,6 +54,14 @@ v0.3.3 — 앱팀 2차 보고(사후·추수검사 대본 8편, 사용성 평가
   (6) 배제 발화 규칙: 명단의 이름 + 배제 표현("재희는 빼고", "도현이 부르지 마")은 공격으로 세고 그 아이를 지목한 것으로 본다.
       모듈 C(배제)가 꺼져 있어도 배제 대본에서 사건이 열린다. WITHU_ENABLE_EXCLUSION_RULE=0 으로 끈다.
 
+v0.3.4 — 배제 탐지 1단계 (4장 표의 포함·제외 사례 기준. 로그 기반 응답 고립 분석은 아직 없음)
+  C1 발화 확인: 배제 발화 규칙에 걸린 메시지를 LLM에 한 번 물어 정당한 목적(깜짝 파티, 목적이 정해진 방,
+     규칙 위반에 따른 관리)이면 공격으로 세지 않는다. set_exclusion_judge()로 연결하며, LLM이 없거나 답하지
+     못하면 규칙 그대로 센다. 전송 후 호출의 새 메시지에만 묻고 결과는 메시지별로 기억한다.
+  C2 방 구조: 방 A의 명단에서 한두 명만 빠진 방 B가 있으면 B를 A의 '부분 방'으로 연결한다. B에서는 빠진 아이의
+     이름도 찾는다 (앱이 그 아이를 B의 participants에 넣지 않아도 된다). 방이 따로 있다는 것만으로는 사건이
+     아니고, 그 방에서 빠진 아이를 향한 공격·배제 발화가 있어야 한다. WITHU_ENABLE_SUBROOM=0 으로 끈다.
+
 연동
   schemas.py     : AnalyzeRequest에 participants, Message에 reply_to_message_id 추가
   app.py         : /analyze 첫 줄에 set_request_context(req)
@@ -109,6 +117,11 @@ W_SOFT_MENTION         = _env("WITHU_SOFT_MENTION_WEIGHT", 0.0)      # 공격이
 PREFER_BACKED          = os.environ.get("WITHU_PREFER_BACKED", "1") != "0"      # 지목·항의 근거가 있는 후보를 먼저 봄
 BACKED_BY_PROTEST      = os.environ.get("WITHU_BACKED_BY_PROTEST", "0") != "0"  # 항의한 아이도 '근거 있는 후보'로 침
 PRIMARY_PROTESTER      = os.environ.get("WITHU_PRIMARY_PROTESTER", "1") != "0"  # 항의한 아이가 여럿이면 당사자 1명만
+# v0.3.4
+ENABLE_SUBROOM         = os.environ.get("WITHU_ENABLE_SUBROOM", "1") != "0"        # 부분 방 연결 (C2)
+SUBROOM_MAX_MISSING    = _env("WITHU_SUBROOM_MAX_MISSING", 2, int)                 # 부분 방에서 빠진 아이 수의 상한
+SUBROOM_MIN_MEMBERS    = _env("WITHU_SUBROOM_MIN_MEMBERS", 3, int)                 # 부분 방의 최소 인원 (1:1 대화는 제외)
+ENABLE_EXCLUSION_LLM   = os.environ.get("WITHU_EXCLUSION_LLM", "1") != "0"         # 배제 발화를 LLM으로 확인 (C1)
 SKIP_THIRD_PERSON      = os.environ.get("WITHU_SKIP_THIRD_PERSON", "1") != "0"  # 남 얘기하는 반응은 피해자 근거에서 뺌
 
 # ----------------------------------------------------- per-request context ---
@@ -170,7 +183,8 @@ def name_tokens(display_name: str, aliases: Iterable[str] = ()) -> set[str]:
 
 # 2글자 이름은 다른 낱말 속에서 잘못 잡히기 쉽다 ("하니" in "하니까").
 # 그래서 앞뒤가 한글이 아니어야 하고, 뒤에는 호격·조사만 허용한다: 하늘아, 하늘이가, 민준한테 …
-_PARTICLE = r"(?:아|야|이|이가|이는|이도|이랑|이한테|이를|이야|가|는|은|을|를|도|랑|이랑|한테|에게|님|씨|쌤|아\s|야\s)?"
+_PARTICLE = (r"(?:이?(?:한테|에게|랑|하고|보고|의|가|는|은|을|를|도|만|야|아|님|씨|쌤)(?:는|도|만)?|이)?"
+             )   # v0.3.4: 겹친 조사도 허용 (도현이한테는, 하늘이만, 민준한테도)
 
 
 def name_pattern(tokens: set[str]):
@@ -187,9 +201,12 @@ def name_pattern(tokens: set[str]):
 
 
 class _Rosters:
+    """방별 명단. v0.3.4: 다른 방의 명단에서 한두 명만 빠진 방은 '부분 방'으로 연결해, 빠진 아이의 이름도 찾는다."""
+
     def __init__(self):
         self._lock = threading.Lock()
         self._rooms: dict[str, dict[str, "re.Pattern"]] = {}
+        self._parent: dict[str, Optional[str]] = {}          # 부분 방 -> 원래 방 (연결을 다시 계산할 때 비운다)
 
     def update(self, room_id, participants) -> None:
         table = {}
@@ -199,11 +216,52 @@ class _Rosters:
                 continue
             table[code] = name_pattern(name_tokens(_get(p, "display_name") or "", _get(p, "aliases") or []))
         with self._lock:
+            if set(self._rooms.get(room_id, {})) != set(table):
+                self._parent.clear()                         # 구성원이 바뀌면 연결을 다시 계산한다
             self._rooms[room_id] = table
 
-    def get(self, room_id) -> dict[str, "re.Pattern"]:
+    def _find_parent(self, room_id) -> Optional[str]:
+        """이 방의 명단을 모두 포함하고 한두 명만 더 있는 방. 여럿이면 빠진 아이가 가장 적은 방."""
+        if room_id in self._parent:
+            return self._parent[room_id]
+        mine = set(self._rooms.get(room_id, {}))
+        best, best_missing = None, None
+        if ENABLE_SUBROOM and len(mine) >= SUBROOM_MIN_MEMBERS:
+            for other, table in self._rooms.items():
+                missing = len(set(table) - mine)
+                if other != room_id and mine < set(table) and missing <= SUBROOM_MAX_MISSING \
+                        and (best_missing is None or missing < best_missing):
+                    best, best_missing = other, missing
+        self._parent[room_id] = best
+        return best
+
+    def absent(self, room_id) -> dict:
+        """이 방이 부분 방이면: 원래 방에는 있고 이 방에는 없는 아이들 {code: 이름 패턴}. 아니면 {}."""
         with self._lock:
-            return dict(self._rooms.get(room_id, {}))
+            parent = self._find_parent(room_id)
+            if parent is None:
+                return {}
+            mine = self._rooms.get(room_id, {})
+            return {c: pat for c, pat in self._rooms[parent].items() if c not in mine}
+
+    def parent(self, room_id) -> Optional[str]:
+        with self._lock:
+            return self._find_parent(room_id)
+
+    def members(self, room_id) -> set:
+        with self._lock:
+            return set(self._rooms.get(room_id, {}))
+
+    def get(self, room_id) -> dict[str, "re.Pattern"]:
+        """이름을 찾을 대상: 이 방의 명단 + (부분 방이면) 빠진 아이들."""
+        with self._lock:
+            table = dict(self._rooms.get(room_id, {}))
+        table.update(self.absent(room_id))
+        return table
+
+    def clear(self):
+        with self._lock:
+            self._rooms.clear(); self._parent.clear()
 
 
 ROSTERS = _Rosters()
@@ -347,6 +405,44 @@ def stance(text: str) -> str:
     return "neutral"
 
 
+# ------------------------------------------------- C1: 배제 발화 확인 (LLM) ---
+_JUDGE = None                      # judge(context_turns, speaker, text) -> True(배제) | False(정당한 목적) | None(모름)
+_JUDGED: dict = {}                 # (room, message key) -> True/False
+_JUDGED_MAX = 20_000
+
+
+def set_exclusion_judge(fn) -> None:
+    """app.py가 LLM이 켜져 있을 때 연결한다. None이면 규칙만 쓴다."""
+    global _JUDGE
+    _JUDGE = fn
+
+
+def _judge_key(room_id, it) -> tuple:
+    return (room_id, it.get("mid") or (it.get("speaker"), (it.get("text") or "").strip()))
+
+
+def exclusion_verdict(room_id, it, context: list, ask: bool) -> Optional[bool]:
+    """규칙에 걸린 배제 발화가 정말 배제인지. 기억해 둔 답이 있으면 그것을, 없고 ask=True면 LLM에 한 번 묻는다.
+    None = 모름 (LLM 없음·실패·아직 안 물음) -> 호출한 쪽은 규칙대로 센다."""
+    if not (ENABLE_EXCLUSION_LLM and _JUDGE is not None):
+        return None
+    key = _judge_key(room_id, it)
+    if key in _JUDGED:
+        return _JUDGED[key]
+    if not ask:
+        return None
+    try:
+        v = _JUDGE([(o["speaker"], o.get("text") or "") for o in context], it["speaker"], it.get("text") or "")
+    except Exception as e:                                   # 판정이 LLM 때문에 깨지면 안 된다
+        print("[exclusion] judge error:", e)
+        v = None
+    if v is not None:
+        if len(_JUDGED) >= _JUDGED_MAX:
+            _JUDGED.clear()
+        _JUDGED[key] = bool(v)
+    return v
+
+
 def _named(text: str, roster: Optional[dict], skip=()) -> list:
     """명단에서 이 메시지에 이름이 나온 아이들의 코드."""
     if not roster or not text:
@@ -370,7 +466,8 @@ def _excl_target(text: str, roster: Optional[dict], skip=()) -> list:
     return [min(after)[1]] if after else []
 
 
-def prepare(items: list[dict], pseudo: bool = True, roster: Optional[dict] = None) -> list[dict]:
+def prepare(items: list[dict], pseudo: bool = True, roster: Optional[dict] = None, *,
+            room_id=None, ask_last: bool = False) -> list[dict]:
     """성격 표시 + 저항 가드 + 항의한 아이 보호 + (선택) 무마 발화·이미지·배제 발화를 공격으로 표시.
     원본은 건드리지 않는다. 낮추는 가드는 항상, 올리는 표시는 pseudo=True 일 때만 적용한다."""
     out = []
@@ -419,6 +516,10 @@ def prepare(items: list[dict], pseudo: bool = True, roster: Optional[dict] = Non
             named = _excl_target(d.get("text"), roster, skip=(who,))
             if not named and last_excl and i - last_excl[0] <= REPEAT_REPLY_SPAN:
                 named = list(last_excl[1])
+            # C1: 깜짝 파티 준비처럼 정당한 목적이면 공격으로 세지 않는다. 새 메시지(마지막)만 LLM에 묻는다
+            if named and exclusion_verdict(room_id, d, out[max(0, i - 6):i], ask_last and i == n - 1) is False:
+                d["note"] = "exclusion_cleared"
+                continue
             if named:
                 d["excl"] = named
                 last_excl = (i, named)
@@ -673,7 +774,8 @@ def evaluate_window_v2(window: list[dict], module_b_window=None, *, room_id=None
         or prepare(window, pseudo=False, roster=roster)
     base = _orig_evaluate_window(guarded, module_b_window) if module_b_window is not None \
         else _orig_evaluate_window(guarded)
-    hist = prepare(hist_raw, roster=roster)
+    hist = prepare(hist_raw, roster=roster, room_id=room_id, ask_last=bool(commit))
+    absent = set(ROSTERS.absent(room_id)) if room_id is not None else set()
     if base["is_bullying"]:
         aggr = base["attr"].aggressors
         nprot = protest_counts(hist, aggr)
@@ -684,11 +786,17 @@ def evaluate_window_v2(window: list[dict], module_b_window=None, *, room_id=None
     meta_by_mid = {it["mid"]: it for it in hist if it.get("mid")}
     r = resolve_target(hist, roster, meta_by_mid)
     if r and r["is_bullying"]:
+        notes = {it["note"] for it in hist if it.get("note") in
+                 ("exclusion_talk", "image_then_protest", "dismissal_after_protest")
+                 and it["speaker"] in set(r["attr"].aggressors)}
+        victim = r["attr"].victim
+        if victim in absent:
+            notes.add("subroom")                      # 피해자가 이 방에는 없고 원래 방에만 있다 (C2)
         return {**r, "target_source": "room_history" if len(hist) > len(window) else "window",
                 "attack_mids": _attack_mids(hist, r["attr"].aggressors),
-                "attack_notes": sorted({it["note"] for it in hist if it.get("note") in
-                                        ("exclusion_talk", "image_then_protest", "dismissal_after_protest")
-                                        and it["speaker"] in set(r["attr"].aggressors)})}
+                "attack_notes": sorted(notes),
+                "victim_in_room": victim in ROSTERS.members(room_id) if room_id is not None else True,
+                "parent_room_id": ROSTERS.parent(room_id) if victim in absent else None}
     detail = [f"{r['attr'].victim_reason}:{r['drop_reason']}"] if r else []
     return {**base, "target_source": "window", "drop_detail": detail}
 
@@ -706,7 +814,7 @@ def _window_part(prepared_hist: list[dict], window: list[dict]) -> Optional[list
     return tail if same else None
 
 
-def message_flags(text: str, speaker: Optional[str] = None, room_id=None) -> dict:
+def message_flags(text: str, speaker: Optional[str] = None, room_id=None, mid=None) -> dict:
     """전송 전 경고(cb_score)용: 이 메시지 하나의 성격과 배제 발화 여부. 방 기록은 바꾸지 않는다."""
     room_id = room_id if room_id is not None else _CTX.get().get("room_id")
     roster = ROSTERS.get(room_id) if room_id is not None else {}
@@ -714,4 +822,6 @@ def message_flags(text: str, speaker: Optional[str] = None, room_id=None) -> dic
     excl = []
     if ENABLE_EXCLUSION_RULE and st not in ("protest", "defend") and _EXCLUDE.search(text or ""):
         excl = _excl_target(text, roster, skip=(speaker,))
+        if excl and exclusion_verdict(room_id, {"mid": mid, "speaker": speaker, "text": text}, [], False) is False:
+            excl = []                                  # LLM이 정당한 목적으로 본 메시지
     return {"stance": st, "exclusion_targets": excl}

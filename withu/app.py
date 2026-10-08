@@ -20,10 +20,10 @@ from .schemas import AnalyzeRequest, AnalyzeResponse
 from .ensemble import Ensemble
 from .check_chat_excel import prosocial_guard
 from .bystander_api import router as bystander_router, tracker
-from .target_resolver import set_request_context 
+from .target_resolver import set_request_context, set_exclusion_judge
 from . import models
 
-app = FastAPI(title="WithU Talk AI 추론 서버", version="0.3.3")
+app = FastAPI(title="WithU Talk AI 추론 서버", version="0.3.4")
 _llm = None            # phase4_bystander 모듈 (ENABLE_BYSTANDER=1일 때)
 app.include_router(bystander_router)
 _ensemble: Ensemble | None = None
@@ -53,6 +53,9 @@ def build_ensemble() -> Ensemble:
             label, why = classify_bystander(ctx, spk, txt)
             return None if str(why).startswith("(error") else label     # None -> 판정부가 키워드 규칙으로 대신 판정
         tracker.set_classifier(_classify)
+        # v0.3.4 (C1): 배제 발화 규칙에 걸린 메시지를 같은 LLM으로 확인한다 (정당한 목적이면 공격으로 세지 않음)
+        from .phase4_bystander import judge_exclusion
+        set_exclusion_judge(judge_exclusion)
     # without ENABLE_BYSTANDER the tracker falls back to a conservative keyword heuristic
 
     return Ensemble(
