@@ -69,7 +69,7 @@ def play(room, parts, lines, win=8):
     score = {}
     ens = Ensemble(message_scorer=lambda t: score.get(t, 0.05), context_scorer=lambda w: 0.0)
     tr = BystanderTracker()
-    T.HISTORY.clear(room)
+    T.HISTORY.clear(room); T.ROSTERS.clear()
     code = {p: f"P{i+1:02d}" for i, p in enumerate(parts)}        # 앱처럼 코드와 화면 이름을 따로 보낸다
     name = {c: p for p, c in code.items()}
     plist = [{"participant_code": c, "display_name": p} for p, c in code.items()]

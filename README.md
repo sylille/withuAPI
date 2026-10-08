@@ -1,4 +1,4 @@
-# 위드유톡 AI 추론 서버 API 문서 v0.3.3
+# 위드유톡 AI 추론 서버 API 문서 v0.3.4
 
 Oct 8, 2026 
 
@@ -12,7 +12,7 @@ Link: https:///resources-stevens-neither-pursue.trycloudflare.com
 | --- | --- |
 | 기본 주소 | 페이지 맨 위 링크 (임시 터널) |
 | 형식 | JSON, UTF-8 (`Content-Type: application/json; charset=utf-8`) |
-| 서버 버전 | 0.3.3 |
+| 서버 버전 | 0.3.4 |
 
 **개인정보 원칙**
 
@@ -34,7 +34,7 @@ Link: https:///resources-stevens-neither-pursue.trycloudflare.com
 `ensemble_ready`와 `bystander_tracker`가 모두 `true`이고 `bystander_llm`이 `ok`여야 정상입니다. `bystander_tracker`가 `false`이면 30초·60초 알림이 나가지 않습니다.
 
 ```json
-{ "status": "ok", "version": "0.3.3", "ensemble_ready": true, "bystander_tracker": true, "bystander_llm": "ok" }
+{ "status": "ok", "version": "0.3.4", "ensemble_ready": true, "bystander_tracker": true, "bystander_llm": "ok" }
 ```
 
 | 필드 | 설명 |
@@ -109,7 +109,9 @@ Link: https:///resources-stevens-neither-pursue.trycloudflare.com
 | `attribution.victim_reason` | 피해자를 찾은 근거: `explicit_target`(답장), `name_mention`(이름), `repeated_target`(반복 공격에 같은 아이가 반응), `distress_signal`, `turn_adjacency` |
 | `attribution.victim_support` | 피해자 근거의 세기. `strong`: 답장·이름으로 지목됐거나 그 아이가 직접 2번 이상 분명하게 항의함. `weak`: 공격 뒤에 반응했다는 것뿐 |
 | `attribution.victim_protests` | 피해자 본인의 분명한 항의 메시지 수 (0.3.3) |
-| `attribution.attack_notes` | 점수가 아니라 규칙으로 공격에 센 근거 (0.3.3): `exclusion_talk`, `image_then_protest`, `dismissal_after_protest` |
+| `attribution.attack_notes` | 점수가 아니라 규칙으로 공격에 센 근거 (0.3.3): `exclusion_talk`, `image_then_protest`, `dismissal_after_protest`. 피해자가 이 방에 없는 부분 방이면 `subroom` (0.3.4) |
+| `attribution.victim_in_room` | 피해자가 이 방의 구성원인지 (0.3.4). `false`면 이 방에는 없는 아이입니다. 그 아이에게 이 방의 내용을 보여 주면 안 됩니다 |
+| `attribution.parent_room_id` | `victim_in_room`이 `false`일 때, 그 아이가 들어 있는 원래 방의 `room_id` (0.3.4). 아니면 `null` |
 | `attribution.attack_message_ids` | 서버가 공격으로 센 메시지의 `message_id` 목록 (0.3.2). 무마 발화와 이미지도 들어갑니다 |
 | `attribution.confidence` | 역할 판정 신뢰도 0\~1 |
 | `attribution.drop_reason` | `is_bullying=false`인 이유 (예: `weak_target`). 디버그용 |
@@ -161,6 +163,15 @@ Link: https:///resources-stevens-neither-pursue.trycloudflare.com
 - 본문이 없는 메시지(`""`, `"[사진]"`)는 0점입니다.
 - 항의·말리기 발화("하지 말라고", "그만해")는 모델 점수가 높아도 0.30 이하로 내리고 `suppressed: true`, `guard_reason: resistance`로 돌려줍니다.
 - 이름 + 배제 표현("○○는 빼고 하자")은 `cb_type`에 `배제`가 붙습니다. 낱말 규칙이며 `cb_score`는 올리지 않습니다.
+
+### 배제 탐지 (0.3.4)
+
+배제는 두 가지로 찾습니다. 응답 패턴으로 찾는 배제(특정 아이의 말에만 아무도 답하지 않는 경우)는 아직 없습니다.
+
+- **배제 발화.** 명단의 이름과 배제 표현("○○는 빼고 하자", "○○ 부르지 마")이 한 메시지에 있으면 후보로 잡고, LLM이 한 번 확인합니다. 생일파티·선물 준비, 조별 과제처럼 구성원이 정해진 방, 규칙 위반에 따른 관리 목적이면 공격으로 세지 않습니다. LLM이 꺼져 있거나 답하지 못하면 후보를 그대로 공격으로 셉니다. LLM 확인은 전송 후 호출에서만 하므로, 전송 전 호출의 `cb_type`에는 확인 전의 `배제`가 나올 수 있습니다.
+- **부분 방.** 어떤 방의 명단이 다른 방의 명단에서 한두 명만 빠진 것이면(3명 이상인 방만) 서버가 두 방을 연결합니다. 부분 방에서는 빠진 아이의 이름도 찾으므로, 그 아이를 `participants`에 넣지 않아도 됩니다. 방이 따로 있다는 것만으로는 사건이 열리지 않고, 그 방에서 빠진 아이를 향한 공격이나 배제 발화가 2번 이상 있어야 합니다. 이때 `victim_in_room`이 `false`로 옵니다.
+
+부분 방 연결은 서버가 두 방의 명단을 모두 받은 뒤에 생깁니다. 서버를 재시작하면 각 방에서 메시지가 한 번씩 온 뒤에 다시 연결됩니다. `participant_code`는 방이 달라도 같은 아이면 같아야 합니다.
 
 ### 사건이 열리는 조건
 
@@ -342,6 +353,10 @@ Link: https:///resources-stevens-neither-pursue.trycloudflare.com
 
 | 구분 | 항목 | 내용 |
 | --- | --- | --- |
+| 추가 (0.3.4) | 배제 발화의 LLM 확인 | 배제 표현 규칙에 걸린 메시지를 LLM이 확인해 깜짝 파티 준비 같은 정당한 경우를 제외 (§4 배제 탐지) |
+| 추가 (0.3.4) | 부분 방 연결 | 한두 명만 빠진 방에서는 빠진 아이의 이름도 찾음. `participants`에 넣지 않아도 됨 |
+| 추가 (0.3.4) | `attribution.victim_in_room`, `attribution.parent_room_id`, `attack_notes`의 `subroom` | 피해자가 방에 없는 사건 표시 |
+| 수정 (0.3.4) | 이름 찾기 | "도현이한테는", "하늘이만"처럼 조사가 겹친 경우에 2글자 이름을 놓치던 문제 |
 | 수정 (0.3.3) | 전송 전 호출 지연 | `cb_score`가 높으면 `track_bystander: false`여도 LLM을 불러 9초 넘게 걸리던 문제. 이제 전송 전 호출과 가해자·피해자의 메시지에는 LLM을 부르지 않음 |
 | 수정 (0.3.3) | LLM 실패 처리 | LLM 호출이 실패하면 9초를 기다린 뒤 조용히 `비해당`을 돌려주던 문제. 이제 빨리 끝내고 키워드 규칙으로 대신 판정하며, `/health`의 `bystander_llm`에 상태가 나옴 |
 | 수정 (0.3.3) | 빈 본문 | `text: ""`(또는 `null`, `"[사진]"`)를 모델에 넘기지 않고 0점 처리. `context` 안에 있어도 됨 |
@@ -382,6 +397,7 @@ Link: https:///resources-stevens-neither-pursue.trycloudflare.com
 6. (0.3.2) `incident_update` 알림을 처리합니다. 피해자가 바뀌면 피해자용 기능을 새 피해자로 옮깁니다 (§6).
 7. (0.3.2) 피해자를 특정하는 기능은 `victim_status`가 `confirmed`일 때 내보냅니다 (권장).
 8. (0.3.2) 이미지 메시지도 `/analyze`로 보내고 `has_image: true`를 붙입니다. 본문이 없으면 `text`는 `""`로 보냅니다. `"[사진]"`으로 보내도 됩니다 (0.3.3).
+10. (0.3.4) `victim_in_room`이 `false`인 사건에서는 피해자용 기능(위로 메시지 등)을 이 방에서 띄우지 않습니다. 방에 없는 아이에게 무엇을 할지는 아직 정해지지 않았습니다. 부분 방 테스트에서 빠진 아이를 `participants`에 일부러 넣을 필요가 없습니다.
 9. (0.3.3) 앱에서 바꿀 것은 없습니다. 전송 전 호출의 시간 초과 처리는 그대로 두세요. `module_scores.context`가 `null`일 수 있습니다.
 
 ## 10. 알려진 제약
@@ -397,7 +413,7 @@ Link: https:///resources-stevens-neither-pursue.trycloudflare.com
 - **방 기록도 메모리에만 있습니다.** 서버 재시작 시 방별 최근 메시지와 명단이 사라집니다.
 - **대화방당 사건 하나.** 같은 방에서 공격이 이어지면 같은 사건에 더해집니다. 새 공격 없이 30분이 지나면 사건이 닫힙니다.
 - **`cb_score` 단독 사용 금지.** 2026-09-30 실서버 테스트에서 평범한 대화가 0.53, `is_defense_action` 표시 없는 위로 메시지("네 잘못이 아니야.")가 0.315로 나왔습니다. 개입은 `is_bullying`으로 판단하세요.
-- **배제는 낱말 규칙으로만 찾습니다 (0.3.3).** 모듈 C(로그 기반)는 아직 비활성입니다. 명단에 있는 이름과 배제 표현이 한 메시지에 같이 나와야 하고, 2번 이상 나와야 사건이 열립니다. 이름 없이 "걔"로만 말하면 잡지 못합니다. 깜짝 파티 준비("○○한테는 말하지 마", "○○ 빼고 방 만들자")도 같은 표현이라 사건으로 열릴 수 있습니다. `WITHU_ENABLE_EXCLUSION_RULE=0`으로 끕니다.
+- **배제는 발화와 방 구조로만 찾습니다 (0.3.4).** 로그 기반 응답 고립 분석(모듈 C 본체)은 아직 없어서, 말없이 무시하는 배제는 잡지 못합니다. 이름 없이 "걔"로만 말하면 잡지 못합니다. 서버가 원래 방을 모르면 부분 방을 연결하지 못합니다. 정당한 부분 방(학원 반, 조별 과제)에서 빠진 아이를 욕하는 말이 2번 이상 나오면 사건으로 열립니다. `WITHU_ENABLE_EXCLUSION_RULE=0`, `WITHU_ENABLE_SUBROOM=0`, `WITHU_EXCLUSION_LLM=0`으로 각각 끕니다.
 - **주변인 발화 판정.** 서버가 LLM(모듈 D)을 켠 경우 LLM으로, 껐거나 LLM이 답하지 못한 경우 보수적인 키워드 규칙으로 판정합니다. 어느 쪽으로 판정했는지는 `history`에 `발화(LLM)` / `발화(규칙)`으로 남습니다. LLM이 `비해당`으로 본 발화는 판정을 바꾸지 않으므로, 말을 했어도 침묵 타이머는 계속 돕니다.
 - **사용성 평가 대본의 피해자 식별은 확인하지 못했습니다 (0.3.3).** 같은 편(동조)이 목록에 없는 표현으로 맞장구치고 피해자가 항의 없이 해명만 하면, 공격 뒤에 더 자주 말한 아이가 임시 피해자로 잡힐 수 있습니다.
 
@@ -440,6 +456,9 @@ curl https://<터널이 출력한 주소>.trycloudflare.com/health
 | `WITHU_CTX_SPEAKERS` | 1 | 모듈 B에 발화자를 구분해 넘김 (학습 때와 같은 형식). `0`이면 0.3.2처럼 구분 없이 넘김 |
 | `WITHU_ENABLE_PROTESTER_GUARD` | 1 | `0`이면 이미 항의한 아이의 말도 점수대로 공격으로 셈 |
 | `WITHU_ENABLE_EXCLUSION_RULE` | 1 | `0`이면 배제 발화 규칙 끔 |
+| `WITHU_EXCLUSION_LLM` | 1 | `0`이면 배제 발화를 LLM으로 확인하지 않고 규칙대로 셈 (0.3.4) |
+| `WITHU_ENABLE_SUBROOM` | 1 | `0`이면 부분 방 연결 끔 (0.3.4) |
+| `WITHU_SUBROOM_MAX_MISSING`, `WITHU_SUBROOM_MIN_MEMBERS` | 2, 3 | 부분 방으로 보는 조건: 빠진 아이 수의 상한, 방의 최소 인원 (0.3.4) |
 | `WITHU_STRONG_MIN_PROTESTS` | 2 | `confirmed`에 필요한 피해자 본인의 항의 메시지 수 |
 | `BYSTANDER_T1_SEC` | 30 | 노출 후 1차 알림까지 (초) |
 | `BYSTANDER_T2_SEC` | 60 | 노출 후 방관 확정 + 2차 알림까지 (초) |
@@ -477,6 +496,16 @@ curl https://<터널이 출력한 주소>.trycloudflare.com/health
 | 침묵 타이머 30초·60초, 알림 최대 2회 | 통과 |
 | 방관→방어 전환과 긍정 피드백 | 통과 |
 
+**v0.3.4 확인 (2026-10-08)**
+
+모델·LLM 없이 도는 테스트만 통과했습니다. 배제 확인용 LLM 문구는 실제 LLM으로 돌려 보지 않았습니다.
+
+| 확인 | 결과 |
+| --- | --- |
+| 새 단위 테스트 (`test_exclusion.py`) | 19/19 |
+| 기존 단위 테스트 3종 | 14/14, 19/19, 32/32 |
+| 검증 코퍼스 | 0.3.3과 같음 (사건 5/5, 피해자 일치 92.5%, 사건 밖 오탐 묶음 35) |
+
 **v0.3.3 확인 (2026-10-08)**
 
 모델 없이 도는 테스트만 통과했습니다. 실제 모델, 실제 LLM, 실제 대본으로는 확인하지 않았습니다.
@@ -484,7 +513,8 @@ curl https://<터널이 출력한 주소>.trycloudflare.com/health
 ```bash
 python withu/test_target_resolver.py      # 14개
 python withu/test_victim_direction.py     # 19개
-python withu/test_report2.py              # 앱팀 2차 보고 항목 32개
+python test_report2.py                    # 앱팀 2차 보고 항목 32개
+python test_exclusion.py                  # 배제 탐지 1단계 19개 (0.3.4)
 python -m withu.phase4_bystander          # LLM이 실제로 답하는지 (오류면 이유가 찍힘)
 ```
 

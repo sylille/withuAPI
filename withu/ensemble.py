@@ -116,8 +116,20 @@ class Ensemble:
         # NEW: prosocial guard on the new message → fixes the comfort-message FP (Bug 1)
         cb_score, suppressed, guard_reason = prosocial_guard(
             new_text, cb_score, is_defense_action=is_def)
+        # NEW: per-message attribution over the window → 가해자/피해자 + targeting-aware verdict
+        items = []
+        for m in ctx + [new]:
+            a = self.score_message(m.get("text"))
+            cb_m, _, _ = prosocial_guard(m.get("text") or "", a,
+                                         is_defense_action=bool(m.get("is_defense_action", False)))
+            items.append({"speaker": m["participant_code"], "text": m.get("text") or "",
+                          "cb": cb_m, "dis": None})
+        verdict = evaluate_window(items)
+        attr = verdict["attr"]
+
         # v0.3.3: 항의·말리기("하지 말라고", "그만해")도 점수가 높게 나오지만 공격이 아니다 → 전송 전 경고를 띄우지 않는다
-        flags = message_flags(new_text, new.get("participant_code"), req.get("room_id"))
+        # (v0.3.4: 역할 판정 뒤에 본다. 전송 후 호출이면 그 사이 LLM이 배제 발화를 확인해 둔다)
+        flags = message_flags(new_text, new.get("participant_code"), req.get("room_id"), new.get("message_id"))
         if not suppressed and flags["stance"] in ("protest", "defend") and cb_score >= TOX_THRESHOLD:
             cb_score, suppressed, guard_reason = min(cb_score, RESIST_CAP), True, "resistance"
 
@@ -129,17 +141,6 @@ class Ensemble:
             types.append("배제")
             scores["exclusion"] = e_score = max(e_score or 0.0, PSEUDO_CB)
         cb_type = "·".join(types) if types else "비해당"
-
-        # NEW: per-message attribution over the window → 가해자/피해자 + targeting-aware verdict
-        items = []
-        for m in ctx + [new]:
-            a = self.score_message(m.get("text"))
-            cb_m, _, _ = prosocial_guard(m.get("text") or "", a,
-                                         is_defense_action=bool(m.get("is_defense_action", False)))
-            items.append({"speaker": m["participant_code"], "text": m.get("text") or "",
-                          "cb": cb_m, "dis": None})
-        verdict = evaluate_window(items)
-        attr = verdict["attr"]
 
         # CHANGED: full intervention now requires a high score AND a real target (fixes Bug 2)
         if cb_score >= self.confirm and verdict["is_bullying"]:
@@ -180,7 +181,10 @@ class Ensemble:
                     "victim_support": verdict.get("victim_support", "weak"),
                     # v0.3.3: 피해자 본인의 분명한 항의 메시지 수, 공격으로 센 근거(배제 발화·이미지·무마)
                     "victim_protests": verdict.get("victim_protests", 0),
-                    "attack_notes": verdict.get("attack_notes", [])},
+                    "attack_notes": verdict.get("attack_notes", []),
+                    # v0.3.4: 피해자가 이 방에 있는지. false면 원래 방(parent_room_id)에만 있는 아이 (부분 방, attack_notes에 subroom)
+                    "victim_in_room": verdict.get("victim_in_room", True),
+                    "parent_room_id": verdict.get("parent_room_id")},
                 "suppressed": suppressed, "guard_reason": guard_reason,   # NEW
                 "bystander_behavior": bystander,
                 "module_scores": {"message": round(m_score, 4),

@@ -28,7 +28,7 @@ def play(room, parts, lines, win=8, absent=(), classify=None, ctx_score=0.0):
     score = {}
     ens = Ensemble(message_scorer=lambda t: score.get(t, 0.05), context_scorer=lambda w: ctx_score)
     tr = BystanderTracker(classify=classify)
-    T.HISTORY.clear(room)
+    T.HISTORY.clear(room); T.ROSTERS.clear()
     code = {p: f"P{i+1:02d}" for i, p in enumerate(list(parts) + list(absent))}
     name = {c: p for p, c in code.items()}
     plist = [{"participant_code": c, "display_name": p} for p, c in code.items()]

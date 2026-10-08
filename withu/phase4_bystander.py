@@ -142,6 +142,66 @@ def classify_bystander(context, speaker, target_text, retries: int = None):
     return "비해당", f"(error: {err})"
 
 
+# ---------------------------------------------------------------- v0.3.4: 배제 발화 확인 (C1)
+EXCL_RUBRIC = """너는 초등학생 단체 채팅방의 한 메시지가 '특정 아이를 의도적으로 따돌리는 말'인지 판단한다.
+규칙이 먼저 "이름 + 빼다·부르지 마·말하지 마" 같은 표현을 찾아 넘겨준 메시지다. 네가 할 일은 정당한 경우를 걸러 내는 것이다.
+라벨:
+- 배제: 그 아이를 놀이·모임·채팅방에서 빼려 하거나, 끼워 주지 말자·말 걸지 말자고 하거나, 그 아이만 빼고 방을 만들려는 말
+- 정당: 따돌림이 아닌 경우
+  1) 생일파티·선물·깜짝 이벤트처럼 당사자에게 잠시 비밀로 해야 하는 준비
+  2) 조별 과제·학원 반·학생회처럼 정해진 구성원만 들어가는 방이나 활동 (그 아이가 원래 그 구성원이 아님)
+  3) 그 아이가 스스로 빠지겠다고 했거나, 아파서·바빠서 못 오는 것을 전하는 말
+  4) 도배·욕설 등 규칙 위반 때문에 관리 목적으로 내보내는 경우
+  5) "○○ 빼고 다 왔어?"처럼 사실을 묻거나 전하는 말
+맥락에 정당한 이유가 보이지 않으면 배제로 본다."""
+
+EXCL_SHOTS = [
+    ([("P1", "이번 주말에 놀이공원 가자"), ("P2", "좋아 누구누구 가")], "P1", "민서는 빼고 가자", "배제"),
+    ([("P1", "걔 오면 재미없어")], "P2", "ㅇㅇ 민서 부르지 마", "배제"),
+    ([("P1", "토요일이 민서 생일이래"), ("P2", "선물 뭐 사지")], "P1", "민서한테는 말하지 마 깜짝 파티 할 거야", "정당"),
+    ([("P1", "과학 조별 과제 우리 조 방 만들자")], "P2", "민서는 다른 조니까 빼고 초대해", "정당"),
+    ([("P1", "다들 운동장으로 와")], "P2", "민서 빼고 다 왔어?", "정당"),
+    ([("P1", "민서 오늘 아파서 못 온대")], "P2", "그럼 민서는 빼고 하자 다음에 같이 하고", "정당"),
+    ([("P1", "우리끼리 방 새로 만들까")], "P2", "민서 없는 방으로 만들자 걔 짜증나", "배제"),
+]
+
+
+def judge_exclusion(context, speaker, target_text, retries: int = None):
+    """배제 발화 규칙에 걸린 메시지를 확인한다. Returns True(배제) | False(정당한 목적) | None(LLM이 답하지 못함).
+    None이면 호출한 쪽(target_resolver)은 규칙대로 센다."""
+    retries = RETRIES if retries is None else retries
+    parts = ["# 예시"]
+    for c, s, t, lab in EXCL_SHOTS:
+        parts.append(f"[맥락]\n{_render_ctx(c)}\n[대상 발화] {s}: {t}\n[정답] {lab}")
+    parts += ["# 판단할 항목", f"[맥락]\n{_render_ctx(context)}\n[대상 발화] {speaker}: {target_text}",
+              '\nJSON만 출력(설명 금지): {"label":"배제|정당","reason":"한 문장 근거"}']
+    user = "\n\n".join(parts)
+    last = None
+    for i in range(retries + 1):
+        try:
+            txt = call_llm(EXCL_RUBRIC, user)
+            STATUS.update(state="ok", error=None, ok=STATUS["ok"] + 1)
+            m = re.search(r"\{.*\}", txt or "", re.DOTALL)
+            label = None
+            if m:
+                try:
+                    label = json.loads(m.group(0)).get("label")
+                except Exception:
+                    label = None
+            if label not in ("배제", "정당"):
+                label = "정당" if "정당" in (txt or "") and "배제" not in (txt or "") else ("배제" if "배제" in (txt or "") else None)
+            return None if label is None else (label == "배제")
+        except Exception as e:
+            last = e
+            if i < retries:
+                time.sleep(0.3)
+    err = f"{type(last).__name__}: {last}"[:300]
+    if STATUS["error"] != err:
+        print(f"[exclusion] !! LLM 호출 실패 ({PROVIDER}/{MODEL}): {err}", flush=True)
+    STATUS.update(state="error", error=err, failed=STATUS["failed"] + 1)
+    return None
+
+
 def self_check():
     """서버 시작 때 한 번 불러 LLM이 실제로 답하는지 확인한다. 결과는 STATUS에 남는다."""
     lab, why = classify_bystander([("P11(가해자)", "너 진짜 냄새나 꺼져")], "P05(주변인)", "야 그만해", retries=0)

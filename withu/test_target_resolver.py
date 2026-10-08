@@ -25,7 +25,7 @@ def check(name, cond, r):
 
 
 def stream(room, conv, win=6, parts=P):
-    T.HISTORY.clear(room)
+    T.HISTORY.clear(room); T.ROSTERS.clear()
     out = []
     for k in range(1, len(conv) + 1):
         out.append(T.evaluate_window_v2(W(*conv[max(0, k - win):k]), room_id=room, participants=parts))
