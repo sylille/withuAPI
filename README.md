@@ -1,18 +1,18 @@
-# 위드유톡 AI 추론 서버 API 문서 v0.3.2
+# 위드유톡 AI 추론 서버 API 문서 v0.3.3
 
-Oct 6, 2026 
+Oct 8, 2026 
 
-https://might-diverse-tool-wood.trycloudflare.com
+Link: 
 
 ## 1. 개요
 
-위드유톡 AI 추론 서버는 대화방 메시지를 받아 사이버불링 여부와 가해자·피해자를 판정합니다. 사건이 열려 있는 동안에는 주변인의 방어·동조·방관 행동을 추적해, 앱이 아이에게 보여 줄 알림을 돌려줍니다. v0.3.0은 v0.2.0에 방관행동 판정부(`/bystander/*`)를 더한 버전이고, v0.3.1은 피해자 식별을 보강했습니다. v0.3.2는 가해자·피해자 방향이 틀리던 문제를 고치고, 사건이 열린 뒤에도 피해자를 바로잡습니다 (§9).
+위드유톡 AI 추론 서버는 대화방 메시지를 받아 사이버불링 여부와 가해자·피해자를 판정합니다. 사건이 열려 있는 동안에는 주변인의 방어·동조·방관 행동을 추적해, 앱이 아이에게 보여 줄 알림을 돌려줍니다. v0.3.0은 v0.2.0에 방관행동 판정부(`/bystander/*`)를 더한 버전이고, v0.3.1은 피해자 식별을 보강했습니다. v0.3.2는 가해자·피해자 방향이 틀리던 문제를 고치고, 사건이 열린 뒤에도 피해자를 바로잡습니다. v0.3.3은 전송 전 호출 지연, 빈 본문 오류, 짧은 대화의 점수, 피해자 확정, 배제 대본을 고쳤습니다 (§9).
 
 | 항목 | 값 |
 | --- | --- |
 | 기본 주소 | 페이지 맨 위 링크 (임시 터널) |
 | 형식 | JSON, UTF-8 (`Content-Type: application/json; charset=utf-8`) |
-| 서버 버전 | 0.3.2 |
+| 서버 버전 | 0.3.3 |
 
 **개인정보 원칙**
 
@@ -31,16 +31,17 @@ https://might-diverse-tool-wood.trycloudflare.com
 
 ## 3. `GET /health` — 서버 상태 확인
 
-두 값이 모두 `true`여야 정상입니다. `bystander_tracker`가 `false`이면 30초·60초 알림이 나가지 않습니다.
+`ensemble_ready`와 `bystander_tracker`가 모두 `true`이고 `bystander_llm`이 `ok`여야 정상입니다. `bystander_tracker`가 `false`이면 30초·60초 알림이 나가지 않습니다.
 
 ```json
-{ "status": "ok", "ensemble_ready": true, "bystander_tracker": true }
+{ "status": "ok", "version": "0.3.3", "ensemble_ready": true, "bystander_tracker": true, "bystander_llm": "ok" }
 ```
 
 | 필드 | 설명 |
 | --- | --- |
 | `ensemble_ready` | 판정 모델(모듈 A·B·D)이 모두 로드됨 |
 | `bystander_tracker` | 방관행동 타이머 스레드가 실행 중 |
+| `bystander_llm` | 주변인 발화 판정 LLM(모듈 D)의 상태 (0.3.3). `ok`, `error`(이유는 `bystander_llm_error`), `unknown`(아직 호출 전), `off`. `error`여도 서버는 키워드 규칙으로 판정을 계속합니다 |
 
 ## 4. `POST /analyze` — 메시지 판정
 
@@ -64,7 +65,8 @@ https://might-diverse-tool-wood.trycloudflare.com
 | 필드 | 타입 | 필수 | 설명 |
 | --- | --- | --- | --- |
 | `participant_code` | string | 예 | 발신자 가명 코드 |
-| `text` | string | 아니오 | 메시지 본문. 기본 `""` |
+| `text` | string | 아니오 | 메시지 본문. 기본 `""`. 본문 없는 이미지는 `""`로 보냅니다. `"[사진]"`도 같은 뜻으로 받습니다 (0.3.3) |
+| `has_image` | boolean | 아니오 | `context` 안의 메시지가 이미지면 `true` (0.3.3). `new_message`는 요청의 `has_image`로도 됩니다 |
 | `message_id` | string | 강력 권장 | 앱의 메시지 ID. 반응 버튼·읽음 이벤트가 이 ID를 가리킵니다. 이미지·무마 발화로 열리는 사건은 이 ID가 있어야 추적됩니다 |
 | `timestamp` | string | 권장 | ISO 8601. 없으면 서버 시각 |
 | `is_defense_action` | boolean | 아니오 | 챗봇 방어행동 선택지로 보낸 메시지면 `true`. 기본 `false` |
@@ -105,18 +107,20 @@ https://might-diverse-tool-wood.trycloudflare.com
 | `attribution.aggressors` | 가해자 코드 목록. `is_bullying=true`일 때만 신뢰 |
 | `attribution.victim` | 피해자 코드. `is_bullying=true`일 때만 신뢰 |
 | `attribution.victim_reason` | 피해자를 찾은 근거: `explicit_target`(답장), `name_mention`(이름), `repeated_target`(반복 공격에 같은 아이가 반응), `distress_signal`, `turn_adjacency` |
-| `attribution.victim_support` | 피해자 근거의 세기 (0.3.2). `strong`: 답장·이름으로 지목됐거나 그 아이가 직접 2번 이상 항의함. `weak`: 공격 뒤에 반응했다는 것뿐 |
+| `attribution.victim_support` | 피해자 근거의 세기. `strong`: 답장·이름으로 지목됐거나 그 아이가 직접 2번 이상 분명하게 항의함. `weak`: 공격 뒤에 반응했다는 것뿐 |
+| `attribution.victim_protests` | 피해자 본인의 분명한 항의 메시지 수 (0.3.3) |
+| `attribution.attack_notes` | 점수가 아니라 규칙으로 공격에 센 근거 (0.3.3): `exclusion_talk`, `image_then_protest`, `dismissal_after_protest` |
 | `attribution.attack_message_ids` | 서버가 공격으로 센 메시지의 `message_id` 목록 (0.3.2). 무마 발화와 이미지도 들어갑니다 |
 | `attribution.confidence` | 역할 판정 신뢰도 0\~1 |
 | `attribution.drop_reason` | `is_bullying=false`인 이유 (예: `weak_target`). 디버그용 |
-| `cb_score` | 메시지 단위 사이버불링 점수 0\~1 (가드 적용 후). 전송 전 경고에만 사용 |
+| `cb_score` | **이 메시지**의 사이버불링 점수 0\~1 (가드 적용 후). 전송 전 경고에만 사용. 0.3.3부터 대화 맥락 점수만으로는 올라가지 않습니다 (아래 "점수 계산") |
 | `cb_type` | `비해당`, `언어적 폭력`, `시각적 폭력`, `배제`, `composite` |
 | `suppressed` | 위로·방어 발화로 판단되어 점수가 억제되었으면 `true` |
-| `guard_reason` | 억제 사유. 없으면 `none` (예: `defense_action`) |
+| `guard_reason` | 억제 사유. 없으면 `none`. `defense_action`, `prosocial_content`(위로), `resistance`(항의·말리기, 0.3.3) |
 | `incident_id` | 이 대화방에 진행 중인 사건 ID. 없으면 `null` |
 | `bystander_behavior` | 발신자가 주변인이면 현재 판정: `방어`, `동조`, `방관`, 또는 `null` |
 | `bystander_state` | 사건과 주변인별 상태 (§7과 같은 형식). 연구 로그용, 아동에게 노출 금지 |
-| `module_scores` | 모듈별 점수. 디버그용 |
+| `module_scores` | 모듈별 점수. 디버그용. `context`는 대화가 4개보다 짧으면 `null`입니다 (0.3.3) |
 | `evidence` | 판정 근거 한 줄 (한국어) |
 | `intervention_needed` | 전환용. 현재 `is_bullying`과 같은 값 |
 | `intervention_level` | **폐기 예정** (§9). 새 코드에서 쓰지 마세요 |
@@ -150,6 +154,14 @@ https://might-diverse-tool-wood.trycloudflare.com
 - `cb_score` 하나로 개입하지 마세요. 평범한 대화도 0.5 안팎이 나올 수 있습니다 (§10).
 - 챗봇 선택지로 보낸 위로 메시지는 `is_defense_action: true`로 보내세요. 이 표시가 없으면 가드가 덜 확실하게 작동합니다.
 
+### 점수 계산 (0.3.3)
+
+- `cb_score`와 `cb_type`은 새 메시지 하나에 대한 값입니다. 대화 맥락 점수(`module_scores.context`)는 창 전체에 대한 값이라, 메시지 자체의 점수(`module_scores.message`)가 0.5 이상일 때만 `cb_score`를 올립니다. 0.3.2까지는 맥락 점수만 높아도 그 대화의 모든 메시지가 `언어적 폭력`으로 나왔습니다.
+- 맥락 점수는 메시지(context + new_message)가 4개 이상일 때만 계산합니다. 모델이 6개짜리 대화로 학습되어 그보다 짧으면 값을 믿을 수 없습니다.
+- 본문이 없는 메시지(`""`, `"[사진]"`)는 0점입니다.
+- 항의·말리기 발화("하지 말라고", "그만해")는 모델 점수가 높아도 0.30 이하로 내리고 `suppressed: true`, `guard_reason: resistance`로 돌려줍니다.
+- 이름 + 배제 표현("○○는 빼고 하자")은 `cb_type`에 `배제`가 붙습니다. 낱말 규칙이며 `cb_score`는 올리지 않습니다.
+
 ### 사건이 열리는 조건
 
 공격 메시지가 있고, 피해자가 다음 중 하나로 특정되어야 합니다. 서버는 방마다 최근 60개·20분 메시지를 기억해서 `context`보다 긴 흐름을 봅니다.
@@ -157,7 +169,7 @@ https://might-diverse-tool-wood.trycloudflare.com
 | 근거 | 조건 |
 | --- | --- |
 | `explicit_target` | 공격 메시지가 그 아이의 메시지에 대한 답장 (`reply_to_message_id`) |
-| `name_mention` | 공격 메시지에 그 아이의 `display_name`/`aliases`가 나옴. 공격 2개 이상, 또는 그 아이가 공격 직후 반응하면 열림 |
+| `name_mention` | 공격 메시지에 그 아이의 `display_name`/`aliases`가 나옴. 공격 2개 이상, 또는 그 아이가 공격 직후 반응하면 열림. 배제 발화(아래)도 공격 메시지로 셉니다 (0.3.3) |
 | `repeated_target` | 이름이 없어도, 한 가해자의 공격이 4개 이상이고 같은 아이가 공격 직후 2번 이상 반응. 반응 수는 (항의 + 그 밖의 반응 − 맞장구)로 셉니다 |
 
 피해자도 같이 욕하면(서로 욕하는 장난) 사건이 열리지 않습니다.
@@ -173,8 +185,16 @@ https://might-diverse-tool-wood.trycloudflare.com
 | 무마 | 장난인데, 왜 화냄?, 예민하네 | 바로 앞(3개 안)에 다른 아이의 항의가 있으면 공격으로 셈 |
 | 말리기 | 그만 싸워, 너무 심하잖아, 얘들아 진정해 | 주변인의 방어. 공격으로도 피해자 근거로도 세지 않음 |
 | 이미지 | `has_image: true` | 바로 뒤(3개 안)에 다른 아이의 항의가 있으면 공격으로 셈 |
+| 배제 (0.3.3) | 재희는 빼고, 도현이 부르지 마, 하린이 빼고 방 만들자 | 명단(`participants`)의 이름과 함께 나오면 공격으로 세고 그 아이를 지목한 것으로 봄. 바로 뒤에 이름 없이 "걔 빼자"로 받아도 같은 아이 |
 
 욕설이 섞인 항의("그만해 병신아")는 되받아치는 것으로 보고 공격으로 셉니다. 웃음이 섞인 항의("아 하지마 ㅋㅋㅋ")는 근거로 쓰지 않습니다.
+
+0.3.3에서 바뀐 점:
+
+- **항의 표현을 늘렸습니다.** 저장하지 마, 놀리지 마, 안 귀여워, 웃기지 않아, 싫어 등.
+- **이미 항의한 아이의 말은 공격으로 세지 않습니다.** 공격·이미지 바로 뒤에 분명하게 항의했고 욕설을 쓰지 않은 아이라면, 그 뒤의 말이 목록에 없는 표현("하나도 안 귀여워")이고 모델 점수가 높아도 항의로 봅니다. 먼저 공격한 아이에게는 적용하지 않습니다.
+- **항의한 아이가 둘 이상이면** 먼저, 더 많이 항의한 아이를 당사자(피해자)로 보고 나머지의 항의는 말리기로 봅니다. "본인이 싫으면 그만해야지", "서아가 싫다잖아"처럼 남의 일로 말하는 표현은 처음부터 말리기입니다.
+- **다른 아이 이야기를 하는 반응**("걔 원래 그래")은 피해자 근거로 세지 않습니다.
 
 ## 5. `POST /bystander/events` — 앱 이벤트 보고
 
@@ -246,7 +266,7 @@ https://might-diverse-tool-wood.trycloudflare.com
 - `new_victim_was_bystander`가 `null`이 아니면 새 피해자가 그동안 주변인으로 분류되어 알림을 받았다는 뜻입니다. 화면에 남은 주변인용 알림을 닫습니다.
 - `previous_victim_role`은 이전 피해자의 새 역할입니다 (`가해자` 또는 `주변인`).
 
-**`victim_status`** 는 `provisional`(근거가 공격 뒤 반응뿐) 또는 `confirmed`(답장·이름으로 지목됐거나 그 아이가 직접 2번 이상 항의함)입니다. `provisional`일 때는 피해자를 특정하는 기능(1:1 위로 메시지, 교사 알림 카드의 이름)을 미루고 `confirmed`가 된 뒤에 내보내기를 권장합니다. 주변인 알림은 `provisional`에서도 그대로 나갑니다.
+**`victim_status`** 는 `provisional`(근거가 공격 뒤 반응뿐) 또는 `confirmed`(답장·이름으로 지목됐거나 그 아이가 직접 2번 이상 분명하게 항의함)입니다. 0.3.3부터 항의는 메시지 수로 셉니다. 가해자의 말 뒤 3개 안에 나온 "하지 마", "지워", "싫어" 같은 항의가 2개면 확정됩니다 (0.3.2는 '항의가 뒤따른 공격'을 세어서, 가해자의 말이 공격으로 잡히지 않으면 항의가 세어지지 않았습니다). 한번 `confirmed`가 된 피해자는 약한 근거 한 번으로 바뀌지 않습니다. `provisional`일 때는 피해자를 특정하는 기능(1:1 위로 메시지, 교사 알림 카드의 이름)을 미루고 `confirmed`가 된 뒤에 내보내기를 권장합니다. 주변인 알림은 `provisional`에서도 그대로 나갑니다.
 
 ## 7. `GET /bystander/state?room_id=…&participant_code=…` — 상태 조회
 
@@ -322,6 +342,15 @@ https://might-diverse-tool-wood.trycloudflare.com
 
 | 구분 | 항목 | 내용 |
 | --- | --- | --- |
+| 수정 (0.3.3) | 전송 전 호출 지연 | `cb_score`가 높으면 `track_bystander: false`여도 LLM을 불러 9초 넘게 걸리던 문제. 이제 전송 전 호출과 가해자·피해자의 메시지에는 LLM을 부르지 않음 |
+| 수정 (0.3.3) | LLM 실패 처리 | LLM 호출이 실패하면 9초를 기다린 뒤 조용히 `비해당`을 돌려주던 문제. 이제 빨리 끝내고 키워드 규칙으로 대신 판정하며, `/health`의 `bystander_llm`에 상태가 나옴 |
+| 수정 (0.3.3) | 빈 본문 | `text: ""`(또는 `null`, `"[사진]"`)를 모델에 넘기지 않고 0점 처리. `context` 안에 있어도 됨 |
+| 변경 (0.3.3) | `cb_score`, `cb_type` | 맥락 점수만으로는 올라가지 않음. 대화가 4개보다 짧으면 맥락 점수를 계산하지 않음 (§4 점수 계산) |
+| 추가 (0.3.3) | `guard_reason: resistance` | 항의·말리기 발화에는 전송 전 경고가 뜨지 않음 |
+| 수정 (0.3.3) | 피해자 방향 | 목록에 없는 항의가 공격으로 세어져 피해자가 가해자로, 말린 친구가 피해자로 바뀌던 문제 (§4 메시지 성격) |
+| 수정 (0.3.3) | `victim_status` | 피해자가 여러 번 항의해도 `confirmed`가 되지 않던 문제 (§6) |
+| 추가 (0.3.3) | 배제 발화 규칙 | 이름 + 배제 표현을 공격으로 셈. 모듈 C 없이도 배제 대본에서 사건이 열리고 `cb_type`에 `배제`가 나옴 |
+| 추가 (0.3.3) | `attribution.victim_protests`, `attribution.attack_notes`, `Message.has_image`, `/health`의 `version`·`bystander_llm` | |
 | 수정 (0.3.2) | 피해자 고정 | 사건이 열린 뒤 피해자가 바뀌지 않던 문제. 이제 판정을 따라 갱신 (§8) |
 | 수정 (0.3.2) | `repeated_target` 방향 | 맞장구친 같은 편이 피해자로 잡히거나, 피해자의 항의가 공격으로 세어져 가해자·피해자가 뒤바뀌던 문제 (§4 메시지 성격) |
 | 추가 (0.3.2) | `incident_update` (알림) | 피해자 변경·확정을 앱에 알림 (§6) |
@@ -352,7 +381,8 @@ https://might-diverse-tool-wood.trycloudflare.com
 5. `intervention_level`에 걸린 개입 동작을 `attribution.is_bullying` 기준으로 옮깁니다.
 6. (0.3.2) `incident_update` 알림을 처리합니다. 피해자가 바뀌면 피해자용 기능을 새 피해자로 옮깁니다 (§6).
 7. (0.3.2) 피해자를 특정하는 기능은 `victim_status`가 `confirmed`일 때 내보냅니다 (권장).
-8. (0.3.2) 이미지 메시지도 `/analyze`로 보내고 `has_image: true`를 붙입니다. 본문이 없으면 `text`는 `""`로 보냅니다.
+8. (0.3.2) 이미지 메시지도 `/analyze`로 보내고 `has_image: true`를 붙입니다. 본문이 없으면 `text`는 `""`로 보냅니다. `"[사진]"`으로 보내도 됩니다 (0.3.3).
+9. (0.3.3) 앱에서 바꿀 것은 없습니다. 전송 전 호출의 시간 초과 처리는 그대로 두세요. `module_scores.context`가 `null`일 수 있습니다.
 
 ## 10. 알려진 제약
 
@@ -367,8 +397,9 @@ https://might-diverse-tool-wood.trycloudflare.com
 - **방 기록도 메모리에만 있습니다.** 서버 재시작 시 방별 최근 메시지와 명단이 사라집니다.
 - **대화방당 사건 하나.** 같은 방에서 공격이 이어지면 같은 사건에 더해집니다. 새 공격 없이 30분이 지나면 사건이 닫힙니다.
 - **`cb_score` 단독 사용 금지.** 2026-09-30 실서버 테스트에서 평범한 대화가 0.53, `is_defense_action` 표시 없는 위로 메시지("네 잘못이 아니야.")가 0.315로 나왔습니다. 개입은 `is_bullying`으로 판단하세요.
-- **배제(모듈 C) 비활성.** 실제 메신저 로그가 쌓이기 전까지 `cb_type`에 `배제`는 나오지 않습니다.
-- **주변인 발화 판정.** 서버가 LLM(모듈 D)을 켠 경우 LLM으로, 끈 경우 보수적인 키워드 규칙으로 판정합니다. 침묵 타이머는 어느 쪽이든 동작합니다.
+- **배제는 낱말 규칙으로만 찾습니다 (0.3.3).** 모듈 C(로그 기반)는 아직 비활성입니다. 명단에 있는 이름과 배제 표현이 한 메시지에 같이 나와야 하고, 2번 이상 나와야 사건이 열립니다. 이름 없이 "걔"로만 말하면 잡지 못합니다. 깜짝 파티 준비("○○한테는 말하지 마", "○○ 빼고 방 만들자")도 같은 표현이라 사건으로 열릴 수 있습니다. `WITHU_ENABLE_EXCLUSION_RULE=0`으로 끕니다.
+- **주변인 발화 판정.** 서버가 LLM(모듈 D)을 켠 경우 LLM으로, 껐거나 LLM이 답하지 못한 경우 보수적인 키워드 규칙으로 판정합니다. 어느 쪽으로 판정했는지는 `history`에 `발화(LLM)` / `발화(규칙)`으로 남습니다. LLM이 `비해당`으로 본 발화는 판정을 바꾸지 않으므로, 말을 했어도 침묵 타이머는 계속 돕니다.
+- **사용성 평가 대본의 피해자 식별은 확인하지 못했습니다 (0.3.3).** 같은 편(동조)이 목록에 없는 표현으로 맞장구치고 피해자가 항의 없이 해명만 하면, 공격 뒤에 더 자주 말한 아이가 임시 피해자로 잡힐 수 있습니다.
 
 ## 부록. 서버 실행과 테스트 (연구팀용)
 
@@ -403,6 +434,13 @@ curl https://<터널이 출력한 주소>.trycloudflare.com/health
 | 변수 | 기본값 | 의미 |
 | --- | --- | --- |
 | `ENABLE_BYSTANDER` | 꺼짐 | `1`이면 주변인 발화를 LLM(모듈 D)으로 판정 |
+| `BYSTANDER_LLM_TIMEOUT`, `BYSTANDER_LLM_RETRIES` | 6, 1 | LLM 호출 1번의 제한 시간(초)과 실패 뒤 다시 시도하는 횟수 (0.3.3) |
+| `WITHU_COMBINE_MODE` | `gated` | `max_of`로 바꾸면 0.3.2의 점수 계산으로 돌아감 |
+| `WITHU_CTX_MIN_WINDOW`, `WITHU_CTX_WINDOW` | 4, 6 | 맥락 점수를 계산하는 최소 메시지 수, 모듈 B에 넘기는 최근 메시지 수 |
+| `WITHU_CTX_SPEAKERS` | 1 | 모듈 B에 발화자를 구분해 넘김 (학습 때와 같은 형식). `0`이면 0.3.2처럼 구분 없이 넘김 |
+| `WITHU_ENABLE_PROTESTER_GUARD` | 1 | `0`이면 이미 항의한 아이의 말도 점수대로 공격으로 셈 |
+| `WITHU_ENABLE_EXCLUSION_RULE` | 1 | `0`이면 배제 발화 규칙 끔 |
+| `WITHU_STRONG_MIN_PROTESTS` | 2 | `confirmed`에 필요한 피해자 본인의 항의 메시지 수 |
 | `BYSTANDER_T1_SEC` | 30 | 노출 후 1차 알림까지 (초) |
 | `BYSTANDER_T2_SEC` | 60 | 노출 후 방관 확정 + 2차 알림까지 (초) |
 | `BYSTANDER_MAX_NUDGES` | 2 | 사건당 아이 1명에게 보내는 최대 알림 수 |
@@ -438,6 +476,26 @@ curl https://<터널이 출력한 주소>.trycloudflare.com/health
 | 퇴장·비정상 종료·재입장·지연 목격 요약 | 통과 |
 | 침묵 타이머 30초·60초, 알림 최대 2회 | 통과 |
 | 방관→방어 전환과 긍정 피드백 | 통과 |
+
+**v0.3.3 확인 (2026-10-08)**
+
+모델 없이 도는 테스트만 통과했습니다. 실제 모델, 실제 LLM, 실제 대본으로는 확인하지 않았습니다.
+
+```bash
+python withu/test_target_resolver.py      # 14개
+python withu/test_victim_direction.py     # 19개
+python withu/test_report2.py              # 앱팀 2차 보고 항목 32개
+python -m withu.phase4_bystander          # LLM이 실제로 답하는지 (오류면 이유가 찍힘)
+```
+
+| 확인 | 결과 |
+| --- | --- |
+| 기존 단위 테스트 2종 | 14/14, 19/19 |
+| 새 단위 테스트 (`test_report2.py`) | 32/32. 같은 테스트를 0.3.2 코드에 돌리면 22개 실패 (보고된 증상이 재현됨) |
+| 실제 FastAPI 앱 + 가짜 모델 + LLM 없음 | 0.3.2: 호출마다 9.0초, 주변인 발화 판정 없음. 0.3.3: 0.01초 안팎, 규칙으로 판정 |
+| 검증 코퍼스 (WCB001\~005, 라벨·욕설 사전을 점수로 사용) | 사건 5/5 유지. 피해자 일치 92.2% → 92.5%, `strong` 판정의 일치 98.5% → 100%, 사건 밖 오탐 묶음 34 → 35 |
+
+새 단위 테스트의 대사는 보고에 인용된 것만 실제 대본의 대사이고 나머지는 가상입니다. 점수도 실제 모델 값이 아닙니다.
 
 **v0.3.2 확인 (2026-10-06)**
 
