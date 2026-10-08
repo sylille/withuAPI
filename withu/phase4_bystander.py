@@ -91,14 +91,14 @@ def call_llm(system: str, user: str) -> str:
         if _client is None:
             from anthropic import Anthropic    # reads ANTHROPIC_API_KEY
             _client = Anthropic(timeout=TIMEOUT, max_retries=0)
-        msg = _client.messages.create(model=MODEL, max_tokens=300, system=system,
+        msg = _client.messages.create(model=MODEL, max_tokens=300, system=system, temperature=0,
                                       messages=[{"role": "user", "content": user}])
         return "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
     if _client is None:
         from openai import OpenAI              # reads OPENAI_API_KEY
         _client = OpenAI(timeout=TIMEOUT, max_retries=0)
     r = _client.chat.completions.create(
-        model=MODEL,
+        model=MODEL, temperature=0,          # v0.3.4: 같은 입력에 같은 답이 나오도록
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}])
     return r.choices[0].message.content or ""
 
