@@ -3,6 +3,7 @@
 Privacy: identifiers are pseudonymous `participant_code`s only — no real names, phone
 numbers, or school names should ever be sent (per the design doc's minimum-info rule).
 
+v0.3.6: + AnalyzeRequest.classmates — 이 방이 속한 학급의 현재 구성원(참여코드 + 닉네임). 방에 없는 같은 반 아이도 피해자 후보.
 v0.3.3: + Message.has_image. text는 ""도 받는다 (본문 없는 이미지). null이 와도 ""로 본다.
 v0.3.0: + message_id, track_bystander, incident_id, bystander_state (방관행동 판정부)
         + attribution / suppressed / guard_reason declared so they are no longer dropped
@@ -32,6 +33,9 @@ class AnalyzeRequest(BaseModel):
     context: List[Message] = Field(default_factory=list, description="recent window, oldest→newest")
     new_message: Message
     participants: List[Participant] = Field(default_factory=list)
+    # v0.3.6: 이 방이 속한 학급의 현재 구성원 전체 (방 구성원 포함 가능). participants에 없는 아이는 '방에 없는 같은 반 아이'로
+    # 이름만 찾는다. 빈 목록이면 이전에 받은 학급 명단을 그대로 쓴다.
+    classmates: List[Participant] = Field(default_factory=list)
     has_image: bool = False
     left_chat: bool = False
     # optional live-log metadata for the exclusion module (Module C) and 방관 log-rule

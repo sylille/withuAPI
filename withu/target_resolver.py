@@ -88,6 +88,16 @@ v0.3.5 — 앱팀 3차 보고(재현 요청 순서 JSON 9편) 반영
   (8) "그건 좀;;"은 말리기, "ㅇㅇ"는 맞장구, "그런 식으로 말하지 마"·"그렇게 말하지 마"는 분명한 항의로 본다.
       "걔한테"만으로는 말리기가 아니다 ("걔한테 들키면 피곤해").
 
+v0.3.6 — 같은 반이지만 방에 없는 아이 (앱팀 요청)
+  (1) /analyze 요청의 classmates(이 방이 속한 학급의 현재 구성원: 참여코드 + 닉네임)를 받는다. participants(방 구성원)에 없는
+      아이는 '방에 없는 같은 반 아이'로 보고, 공격 메시지에서 그 아이의 이름도 찾는다. 부분 방(C2)과 달리 다른 방의 명단이
+      없어도 된다. 학급이 바뀌면 앱이 다음 요청부터 새 명단을 보내므로 서버 명단을 따로 고칠 필요가 없다.
+  (2) 방에 없는 아이는 반응·항의를 할 수 없으므로, 그 아이의 이름이 나온 공격(배제 발화 포함)이 2개 이상이어야 사건이 열린다
+      (4장 표 2 언어적 폭력 포함 사례: 채팅방에 없는 아이를 향한 험담·모욕이 반복·강화되는 경우). 부분 방에도 같이 적용된다.
+  (3) 같은 반 아이의 이름 조각이 방 구성원의 이름 조각과 같으면(김하늘 / 박하늘의 '하늘') 그 조각은 방 구성원 것으로만 본다.
+  (4) 응답: victim_in_room=false, attack_notes에 absent_classmate (부분 방이면 예전처럼 subroom + parent_room_id).
+      WITHU_ENABLE_CLASSMATES=0 으로 끈다. WITHU_ABSENT_MIN_MENTIONS 로 (2)의 공격 수를 바꾼다.
+
 연동
   schemas.py     : AnalyzeRequest에 participants, Message에 reply_to_message_id 추가
   app.py         : /analyze 첫 줄에 set_request_context(req)
@@ -160,6 +170,9 @@ ADDRESS_STRONG_ATTACKS = _env("WITHU_ADDRESS_STRONG_ATTACKS", 2, int)           
 EXCL_FOLLOW_SPAN       = _env("WITHU_EXCL_FOLLOW_SPAN", 8, int)                    # 배제 발화 뒤 몇 메시지까지 이어 가는 말로 보나
 BUTT_OUT_SPAN          = _env("WITHU_BUTT_OUT_SPAN", 5, int)                       # "끼지 마": 그 아이가 이 안에서 말했으면 참견 막기
 SKIP_THIRD_PERSON      = os.environ.get("WITHU_SKIP_THIRD_PERSON", "1") != "0"  # 남 얘기하는 반응은 피해자 근거에서 뺌
+# v0.3.6
+ENABLE_CLASSMATES      = os.environ.get("WITHU_ENABLE_CLASSMATES", "1") != "0"     # 방에 없는 같은 반 아이를 피해자 후보로
+ABSENT_MIN_MENTIONS    = _env("WITHU_ABSENT_MIN_MENTIONS", 2, int)                 # 방에 없는 아이: 이름이 나온 공격 수 (반응을 볼 수 없어서)
 
 # ----------------------------------------------------- per-request context ---
 _CTX: contextvars.ContextVar[dict] = contextvars.ContextVar("withu_target_ctx", default={})
@@ -171,6 +184,9 @@ def set_request_context(req: Any) -> None:
     parts = getattr(req, "participants", None) or []
     if parts:
         ROSTERS.update(room_id, parts)
+    mates = getattr(req, "classmates", None) or []
+    if mates:
+        ROSTERS.update_class(room_id, mates)          # v0.3.6: 학급 명단 (빈 목록이면 이전 명단 유지)
     metas = [_msg_meta(m) for m in (getattr(req, "context", None) or [])]
     nm = getattr(req, "new_message", None)
     if nm is not None:
@@ -237,25 +253,56 @@ def name_pattern(tokens: set[str]):
     return re.compile("|".join(parts))
 
 
+def _tokens_of(participants) -> dict:
+    out = {}
+    for p in participants or []:
+        code = _get(p, "participant_code")
+        if code:
+            out[code] = name_tokens(_get(p, "display_name") or "", _get(p, "aliases") or [])
+    return out
+
+
 class _Rosters:
-    """방별 명단. v0.3.4: 다른 방의 명단에서 한두 명만 빠진 방은 '부분 방'으로 연결해, 빠진 아이의 이름도 찾는다."""
+    """방별 명단. v0.3.4: 다른 방의 명단에서 한두 명만 빠진 방은 '부분 방'으로 연결해, 빠진 아이의 이름도 찾는다.
+    v0.3.6: 방마다 학급 명단(classmates)도 받아, 방에 없는 같은 반 아이의 이름도 찾는다."""
 
     def __init__(self):
         self._lock = threading.Lock()
         self._rooms: dict[str, dict[str, "re.Pattern"]] = {}
+        self._toks: dict[str, dict[str, set]] = {}           # 방 -> {코드: 이름 조각}
+        self._class: dict[str, dict[str, set]] = {}          # v0.3.6: 방 -> 학급 명단 {코드: 이름 조각}
+        self._mates_cache: dict[str, dict] = {}              # v0.3.6: 방 -> {방에 없는 같은 반 아이 코드: 이름 패턴}
         self._parent: dict[str, Optional[str]] = {}          # 부분 방 -> 원래 방 (연결을 다시 계산할 때 비운다)
 
     def update(self, room_id, participants) -> None:
-        table = {}
-        for p in participants:
-            code = _get(p, "participant_code")
-            if not code:
-                continue
-            table[code] = name_pattern(name_tokens(_get(p, "display_name") or "", _get(p, "aliases") or []))
+        toks = _tokens_of(participants)
+        table = {c: name_pattern(t) for c, t in toks.items()}
         with self._lock:
             if set(self._rooms.get(room_id, {})) != set(table):
                 self._parent.clear()                         # 구성원이 바뀌면 연결을 다시 계산한다
+            if self._toks.get(room_id) != toks:
+                self._mates_cache.pop(room_id, None)
             self._rooms[room_id] = table
+            self._toks[room_id] = toks
+
+    def update_class(self, room_id, classmates) -> None:
+        """v0.3.6: 이 방이 속한 학급의 현재 구성원. 요청마다 와도 되고, 바뀌었을 때만 다시 계산한다."""
+        toks = _tokens_of(classmates)
+        with self._lock:
+            if self._class.get(room_id) != toks:
+                self._class[room_id] = toks
+                self._mates_cache.pop(room_id, None)
+
+    def _classmates_absent(self, room_id) -> dict:
+        """학급 명단에는 있고 이 방의 명단에는 없는 아이들 {code: 이름 패턴}. 방 구성원과 겹치는 이름 조각은 뺀다. (lock 안에서 부른다)"""
+        if not ENABLE_CLASSMATES or room_id not in self._class:
+            return {}
+        if room_id not in self._mates_cache:
+            mine = self._toks.get(room_id, {})
+            taken = set().union(*mine.values()) if mine else set()
+            self._mates_cache[room_id] = {c: name_pattern(t - taken) for c, t in self._class[room_id].items()
+                                          if c not in mine and (t - taken)}
+        return self._mates_cache[room_id]
 
     def _find_parent(self, room_id) -> Optional[str]:
         """이 방의 명단을 모두 포함하고 한두 명만 더 있는 방. 여럿이면 빠진 아이가 가장 적은 방."""
@@ -272,14 +319,27 @@ class _Rosters:
         self._parent[room_id] = best
         return best
 
+    def _subroom_absent(self, room_id) -> dict:
+        parent = self._find_parent(room_id)
+        if parent is None:
+            return {}
+        mine = self._rooms.get(room_id, {})
+        return {c: pat for c, pat in self._rooms[parent].items() if c not in mine}
+
     def absent(self, room_id) -> dict:
-        """이 방이 부분 방이면: 원래 방에는 있고 이 방에는 없는 아이들 {code: 이름 패턴}. 아니면 {}."""
+        """이 방에 없지만 이름을 찾을 아이들 {code: 이름 패턴}: 부분 방이면 원래 방에서 빠진 아이(C2),
+        학급 명단이 있으면 방에 없는 같은 반 아이(v0.3.6). 둘 다 아니면 {}."""
         with self._lock:
-            parent = self._find_parent(room_id)
-            if parent is None:
-                return {}
-            mine = self._rooms.get(room_id, {})
-            return {c: pat for c, pat in self._rooms[parent].items() if c not in mine}
+            out = dict(self._classmates_absent(room_id))
+            out.update(self._subroom_absent(room_id))        # 부분 방의 빠진 아이는 원래 방의 이름 그대로
+            return out
+
+    def absent_kind(self, room_id) -> dict:
+        """{code: 'subroom' | 'classmate'} — 방에 없는 아이를 어느 경로로 알았는지."""
+        with self._lock:
+            out = {c: "classmate" for c in self._classmates_absent(room_id)}
+            out.update({c: "subroom" for c in self._subroom_absent(room_id)})
+            return out
 
     def parent(self, room_id) -> Optional[str]:
         with self._lock:
@@ -299,6 +359,7 @@ class _Rosters:
     def clear(self):
         with self._lock:
             self._rooms.clear(); self._parent.clear()
+            self._toks.clear(); self._class.clear(); self._mates_cache.clear()
 
 
 ROSTERS = _Rosters()
@@ -758,7 +819,7 @@ def address_runs(items, aset, roster, pref=None) -> list:
     return out
 
 
-def resolve_target(items, roster, meta_by_mid) -> Optional[dict]:
+def resolve_target(items, roster, meta_by_mid, absent=frozenset()) -> Optional[dict]:
     """
     피해자 후보마다 신호를 합산해 한 명을 고른다 (기록 전체 기준).
       explicit : 공격 메시지가 답장(reply_to)으로 가리킨 메시지의 발신자      × 6
@@ -916,6 +977,9 @@ def resolve_target(items, roster, meta_by_mid) -> Optional[dict]:
         reason = "explicit_target"
     elif mention[victim]:
         reason = "name_mention"
+        # v0.3.6: 방에 없는 아이는 반응할 수 없다. 그 아이의 이름이 나온 공격이 2개 이상이어야 한다 (험담이 한 번이면 열지 않음)
+        if victim in absent and mention[victim] < ABSENT_MIN_MENTIONS:
+            return _fail(aggressors, victim, reason, "absent_single_mention")
         if top_attacks < NAME_MIN_ATTACKS and nrep[victim] == 0:
             return _fail(aggressors, victim, reason, "name_single_attack")
     else:
@@ -1023,7 +1087,9 @@ def evaluate_window_v2(window: list[dict], module_b_window=None, *, room_id=None
     base = _orig_evaluate_window(guarded, module_b_window) if module_b_window is not None \
         else _orig_evaluate_window(guarded)
     hist = prepare(hist_raw, roster=roster, room_id=room_id, ask_last=bool(commit))
-    absent = set(ROSTERS.absent(room_id)) if room_id is not None else set()
+    kinds = ROSTERS.absent_kind(room_id) if room_id is not None else {}
+    spoke = {it["speaker"] for it in hist}
+    absent = {c for c in kinds if c not in spoke}       # 이 방에서 말한 아이는 명단에 없어도 방에 있는 아이다
     if base["is_bullying"]:
         aggr = base["attr"].aggressors
         nprot = protest_counts(hist, aggr)
@@ -1032,19 +1098,21 @@ def evaluate_window_v2(window: list[dict], module_b_window=None, *, room_id=None
                 "victim_protests": nprot[base["attr"].victim]}
 
     meta_by_mid = {it["mid"]: it for it in hist if it.get("mid")}
-    r = resolve_target(hist, roster, meta_by_mid)
+    r = resolve_target(hist, roster, meta_by_mid, absent)
     if r and r["is_bullying"]:
         notes = {it["note"] for it in hist if it.get("note") in
                  ("exclusion_talk", "image_then_protest", "dismissal_after_protest")
                  and it["speaker"] in set(r["attr"].aggressors)}
         victim = r["attr"].victim
         if victim in absent:
-            notes.add("subroom")                      # 피해자가 이 방에는 없고 원래 방에만 있다 (C2)
+            # subroom: 이 방에는 없고 원래 방에만 있다 (C2). absent_classmate: 학급 명단에만 있는 같은 반 아이 (v0.3.6)
+            notes.add("subroom" if kinds[victim] == "subroom" else "absent_classmate")
+        in_room = room_id is None or victim not in absent and (victim in ROSTERS.members(room_id) or victim in spoke)
         return {**r, "target_source": "room_history" if len(hist) > len(window) else "window",
                 "attack_mids": _attack_mids(hist, r["attr"].aggressors),
                 "attack_notes": sorted(notes),
-                "victim_in_room": victim in ROSTERS.members(room_id) if room_id is not None else True,
-                "parent_room_id": ROSTERS.parent(room_id) if victim in absent else None}
+                "victim_in_room": in_room,
+                "parent_room_id": ROSTERS.parent(room_id) if victim in absent and kinds[victim] == "subroom" else None}
     detail = [f"{r['attr'].victim_reason}:{r['drop_reason']}"] if r else []
     return {**base, "target_source": "window", "drop_detail": detail}
 
