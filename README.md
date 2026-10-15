@@ -2,7 +2,7 @@
 
 Oct 15, 2026 
 
-Link: https://pregnant-foam-preventing-info.trycloudflare.com   
+Link: https://remedy-fashion-voices-yards.trycloudflare.com
 
 ## 1. 개요
 
