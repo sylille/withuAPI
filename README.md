@@ -1,23 +1,23 @@
-# 위드유톡 AI 추론 서버 API 문서 v0.3.5
+# 위드유톡 AI 추론 서버 API 문서 v0.3.6
 
-Oct 8, 2026 
+Oct 15, 2026 
 
 Link: https://pregnant-foam-preventing-info.trycloudflare.com   
 
 ## 1. 개요
 
-위드유톡 AI 추론 서버는 대화방 메시지를 받아 사이버불링 여부와 가해자·피해자를 판정합니다. 사건이 열려 있는 동안에는 주변인의 방어·동조·방관 행동을 추적해, 앱이 아이에게 보여 줄 알림을 돌려줍니다. v0.3.0은 v0.2.0에 방관행동 판정부(`/bystander/*`)를 더한 버전이고, v0.3.1은 피해자 식별을 보강했습니다. v0.3.2는 가해자·피해자 방향이 틀리던 문제를 고치고, 사건이 열린 뒤에도 피해자를 바로잡습니다. v0.3.3은 전송 전 호출 지연, 빈 본문 오류, 짧은 대화의 점수, 피해자 확정, 배제 대본을 고쳤습니다. v0.3.5는 이름이 안 나오는 대화의 피해자 식별(2인칭 지목), 말리던 아이가 피해자로 바뀌던 문제, 배제 대본의 공동 가해자를 고쳤습니다 (§9).
+위드유톡 AI 추론 서버는 대화방 메시지를 받아 사이버불링 여부와 가해자·피해자를 판정합니다. 사건이 열려 있는 동안에는 주변인의 방어·동조·방관 행동을 추적해, 앱이 아이에게 보여 줄 알림을 돌려줍니다. v0.3.0은 v0.2.0에 방관행동 판정부(`/bystander/*`)를 더한 버전이고, v0.3.1은 피해자 식별을 보강했습니다. v0.3.2는 가해자·피해자 방향이 틀리던 문제를 고치고, 사건이 열린 뒤에도 피해자를 바로잡습니다. v0.3.3은 전송 전 호출 지연, 빈 본문 오류, 짧은 대화의 점수, 피해자 확정, 배제 대본을 고쳤습니다. v0.3.5는 이름이 안 나오는 대화의 피해자 식별(2인칭 지목), 말리던 아이가 피해자로 바뀌던 문제, 배제 대본의 공동 가해자를 고쳤습니다. v0.3.6은 같은 반이지만 방에 없는 아이도 피해자로 찾습니다 (§4 방에 없는 아이, §9).
 
 | 항목 | 값 |
 | --- | --- |
 | 기본 주소 | 페이지 맨 위 링크 (임시 터널) |
 | 형식 | JSON, UTF-8 (`Content-Type: application/json; charset=utf-8`) |
-| 서버 버전 | 0.3.5 |
+| 서버 버전 | 0.3.6 |
 
 **개인정보 원칙**
 
 - 모든 식별자는 가명 `participant_code`(예: `P05`)로 보냅니다. 전화번호, 학교명은 보내지 않습니다.
-- `participants[].display_name`은 앱 화면에 보이는 이름입니다. 서버는 공격 메시지에서 이름을 찾는 데만 메모리로 쓰고 저장하지 않습니다.
+- `participants[].display_name`, `classmates[].display_name`은 앱 화면에 보이는 이름(닉네임)입니다. 서버는 공격 메시지에서 이름을 찾는 데만 메모리로 쓰고 저장하지 않습니다. 실명은 따로 보내지 않습니다.
 - 1:1 대화 내용은 보내지 않습니다. 방어 기능을 사용했다는 사실만 이벤트로 보냅니다.
 - `/bystander/state`의 판정 결과(방관 등)는 아동에게 보여 주지 않습니다.
 
@@ -34,7 +34,7 @@ Link: https://pregnant-foam-preventing-info.trycloudflare.com
 `ensemble_ready`와 `bystander_tracker`가 모두 `true`이고 `bystander_llm`이 `ok`여야 정상입니다. `bystander_tracker`가 `false`이면 30초·60초 알림이 나가지 않습니다.
 
 ```json
-{ "status": "ok", "version": "0.3.5", "ensemble_ready": true, "bystander_tracker": true, "bystander_llm": "ok" }
+{ "status": "ok", "version": "0.3.6", "ensemble_ready": true, "bystander_tracker": true, "bystander_llm": "ok" }
 ```
 
 | 필드 | 설명 |
@@ -55,6 +55,7 @@ Link: https://pregnant-foam-preventing-info.trycloudflare.com
 | `new_message` | Message | 예 | 판정할 메시지 (아래 Message 표) |
 | `context` | Message\[\] | 아니오 | 직전 대화, 오래된 것부터. 기본 `[]` |
 | `participants` | Participant\[\] | 권장 | 대화방 구성원 명단. 피해자 이름 지목에 씁니다. 서버가 방별로 기억하므로 입장·변경 때만 보내도 되지만, 매번 보내도 됩니다 |
+| `classmates` | Participant\[\] | 권장 (0.3.6) | 이 방이 속한 학급의 **현재** 구성원 전체 (형식은 `participants`와 같음). 방 구성원이 들어 있어도 됩니다. `participants`에 없는 아이는 '방에 없는 같은 반 아이'로 보고 이름을 찾습니다. 앱 DB 기준으로 요청마다 보내면 전학·추가가 바로 반영됩니다. 빈 목록이거나 없으면 서버가 이전에 받은 명단을 그대로 씁니다 |
 | `track_bystander` | boolean | 아니오 | 기본 `true`. 전송 전 호출은 `false`, 전송 후 호출은 `true`. 메시지마다 `true` 호출은 한 번만 |
 | `has_image` | boolean | 시각적 폭력에 필요 | `new_message`가 이미지(사진·캡처)면 `true`. 기본 `false`. 이미지 바로 뒤에 다른 아이가 항의하면 그 이미지를 공격으로 셉니다 (0.3.2) |
 | `left_chat` | boolean | 아니오 | 발신자가 대화방을 나갔는지. 기본 `false` |
@@ -90,6 +91,12 @@ Link: https://pregnant-foam-preventing-info.trycloudflare.com
     { "participant_code": "P03", "display_name": "하늘" },
     { "participant_code": "P05", "display_name": "별이" }
   ],
+  "classmates": [
+    { "participant_code": "P11", "display_name": "내가최고다" },
+    { "participant_code": "P03", "display_name": "하늘" },
+    { "participant_code": "P05", "display_name": "별이" },
+    { "participant_code": "P08", "display_name": "박서윤" }
+  ],
   "context": [
     { "participant_code": "P11", "text": "하늘 너 진짜 냄새나 꺼져", "message_id": "m1", "timestamp": "2026-10-05T14:21:40+09:00" },
     { "participant_code": "P03", "text": "왜 그래...", "message_id": "m2", "timestamp": "2026-10-05T14:21:52+09:00" }
@@ -109,9 +116,9 @@ Link: https://pregnant-foam-preventing-info.trycloudflare.com
 | `attribution.victim_reason` | 피해자를 찾은 근거: `explicit_target`(답장), `name_mention`(이름), `direct_address`(2인칭 지목, 0.3.5), `repeated_target`(반복 공격에 같은 아이가 반응), `distress_signal`, `turn_adjacency`. 값은 늘어날 수 있으니 모르는 값이 와도 오류로 처리하지 마세요 |
 | `attribution.victim_support` | 피해자 근거의 세기. `strong`: 답장·이름으로 지목됐거나 그 아이가 직접 2번 이상 분명하게 항의함. `weak`: 공격 뒤에 반응했다는 것뿐 |
 | `attribution.victim_protests` | 피해자 본인의 분명한 항의 메시지 수 (0.3.3) |
-| `attribution.attack_notes` | 점수가 아니라 규칙으로 공격에 센 근거 (0.3.3): `exclusion_talk`, `image_then_protest`, `dismissal_after_protest`. 피해자가 이 방에 없는 부분 방이면 `subroom` (0.3.4) |
+| `attribution.attack_notes` | 점수가 아니라 규칙으로 공격에 센 근거 (0.3.3): `exclusion_talk`, `image_then_protest`, `dismissal_after_protest`. 피해자가 이 방에 없는 부분 방이면 `subroom` (0.3.4), 학급 명단에만 있는 같은 반 아이면 `absent_classmate` (0.3.6) |
 | `attribution.victim_in_room` | 피해자가 이 방의 구성원인지 (0.3.4). `false`면 이 방에는 없는 아이입니다. 그 아이에게 이 방의 내용을 보여 주면 안 됩니다 |
-| `attribution.parent_room_id` | `victim_in_room`이 `false`일 때, 그 아이가 들어 있는 원래 방의 `room_id` (0.3.4). 아니면 `null` |
+| `attribution.parent_room_id` | 부분 방(`subroom`)일 때, 그 아이가 들어 있는 원래 방의 `room_id` (0.3.4). 학급 명단으로 찾은 아이(`absent_classmate`)이거나 방에 있는 아이면 `null` |
 | `attribution.attack_message_ids` | 서버가 공격으로 센 메시지의 `message_id` 목록 (0.3.2). 무마 발화와 이미지도 들어갑니다 |
 | `attribution.confidence` | 역할 판정 신뢰도 0\~1 |
 | `attribution.drop_reason` | `is_bullying=false`인 이유 (예: `weak_target`). 디버그용 |
@@ -173,6 +180,17 @@ Link: https://pregnant-foam-preventing-info.trycloudflare.com
 
 부분 방 연결은 서버가 두 방의 명단을 모두 받은 뒤에 생깁니다. 서버를 재시작하면 각 방에서 메시지가 한 번씩 온 뒤에 다시 연결됩니다. `participant_code`는 방이 달라도 같은 아이면 같아야 합니다.
 
+### 방에 없는 아이 (0.3.6)
+
+`classmates`를 보내면 같은 반이지만 이 방에 없는 아이도 피해자 후보가 됩니다. 4장 표 2의 언어적 폭력 포함 사례(채팅방에 없는 아이를 향한 험담·모욕이 반복되거나 강화되는 경우)를 따릅니다.
+
+- 방에 없는 아이는 반응하거나 항의할 수 없어서, **그 아이의 이름이 나온 공격(배제 발화 포함)이 2개 이상**이어야 사건이 열립니다. "박서윤 진짜 짜증나!!"가 한 번이면 열리지 않고, 두 번째에서 열립니다. 부분 방에도 같이 적용됩니다.
+- 공격으로 세는 기준은 방에 있는 아이와 같습니다. 모듈 A 점수가 0.5 이상이거나 배제 발화 규칙에 걸려야 합니다. 욕설 없이 불만만 말한 문장은 점수에 따라 세지 않을 수 있습니다.
+- 이름은 `display_name`(닉네임)에 적힌 대로 찾습니다. 닉네임이 `박서윤`이면 "박서윤", "서윤이", "서윤아"를 찾습니다. 닉네임이 `별빛토끼`인 아이를 실명 "박서윤"으로 부르면 찾지 못합니다.
+- 같은 반 아이의 이름 조각이 방 구성원의 것과 같으면(방에 김하늘, 방 밖에 박하늘이 있을 때 "하늘이") 방 구성원으로 봅니다. "박하늘"처럼 성까지 쓰면 박하늘로 찾습니다.
+- 응답의 `victim_in_room`은 `false`, `attack_notes`에 `absent_classmate`가 들어갑니다. 이 방에서 말한 아이는 `participants`에 빠져 있어도 방에 있는 아이로 봅니다.
+- 주변인 판정(방어·동조·방관)과 알림은 방에 있는 아이들에게 평소처럼 나갑니다. 피해자용 기능은 이 방에서 띄우지 않습니다 (§9 앱이 할 일 10).
+
 ### 사건이 열리는 조건
 
 공격 메시지가 있고, 피해자가 다음 중 하나로 특정되어야 합니다. 서버는 방마다 최근 60개·20분 메시지를 기억해서 `context`보다 긴 흐름을 봅니다.
@@ -180,7 +198,7 @@ Link: https://pregnant-foam-preventing-info.trycloudflare.com
 | 근거 | 조건 |
 | --- | --- |
 | `explicit_target` | 공격 메시지가 그 아이의 메시지에 대한 답장 (`reply_to_message_id`) |
-| `name_mention` | 공격 메시지에 그 아이의 `display_name`/`aliases`가 나옴. 공격 2개 이상, 또는 그 아이가 공격 직후 반응하면 열림. 배제 발화(아래)도 공격 메시지로 셉니다 (0.3.3) |
+| `name_mention` | 공격 메시지에 그 아이의 `display_name`/`aliases`가 나옴. 공격 2개 이상, 또는 그 아이가 공격 직후 반응하면 열림. 배제 발화(아래)도 공격 메시지로 셉니다 (0.3.3). 방에 없는 아이는 그 아이의 이름이 나온 공격이 2개 이상이어야 함 (0.3.6) |
 | `direct_address` (0.3.5) | 이름이 없어도, 가해자가 이어서 보낸 줄 묶음("야" / "니가 뭔 상관인데" / 욕설)에 공격과 2인칭(너·니·넌·니가)이 있고, 그 묶음 바로 앞에서 말한 아이가 묶음 뒤 10개 안에 항의하면 열림. 가해자의 공격이 2개 이상이어야 합니다. 그 묶음 안의 공격이 2개 이상이고 항의가 분명한 항의면 `victim_support: strong`(= `confirmed`). 공격에서 이름으로 불린 아이가 따로 있으면 쓰지 않습니다 |
 | `repeated_target` | 이름이 없어도, 한 가해자의 공격이 4개 이상이고 같은 아이가 공격 직후 2번 이상 반응. 반응 수는 (항의 + 그 밖의 반응 − 맞장구)로 셉니다. 그 아이의 마지막 말이 최근 15개 안에 있어야 합니다 (0.3.5) |
 
@@ -363,6 +381,8 @@ Link: https://pregnant-foam-preventing-info.trycloudflare.com
 
 | 구분 | 항목 | 내용 |
 | --- | --- | --- |
+| 추가 (0.3.6) | `classmates` (요청), `attack_notes`의 `absent_classmate` | 같은 반이지만 방에 없는 아이도 피해자 후보. 다른 방의 명단이 없어도 됨 (§4 방에 없는 아이) |
+| 변경 (0.3.6) | 방에 없는 피해자 | 그 아이의 이름이 나온 공격이 2개 이상이어야 사건이 열림 (부분 방 포함). 0.3.4는 이름이 한 번 나오고 다른 공격이 하나 더 있어도 열렸음 |
 | 추가 (0.3.5) | `victim_reason: direct_address` | 이름이 안 나와도 2인칭("니가 뭔 상관인데")으로 향한 공격과 그 아이의 항의로 사건이 열림 (§4 사건이 열리는 조건). 사용성 평가 대본에서 사건이 열리지 않던 문제 |
 | 수정 (0.3.5) | 확정된 피해자가 바뀌던 문제 | "○○는 끼지 마" 한 줄에 말리던 아이가 피해자가 되고 원래 피해자가 주변인(방어)으로 바뀌던 문제 (추수검사 1). 말리던 아이를 막는 말은 지목으로 세지 않고, 배제 표현 한 번이 다른 후보를 지우지 않음 |
 | 수정 (0.3.5) | 배제 대본의 공동 가해자 | 욕설 없이 배제를 이어 가는 아이("방 새로 파서 정하자", "○○한테 절대 말하지 마")가 주변인(동조)으로 나오던 문제 (사후검사 2, 추수검사 2) |
@@ -413,6 +433,7 @@ Link: https://pregnant-foam-preventing-info.trycloudflare.com
 8. (0.3.2) 이미지 메시지도 `/analyze`로 보내고 `has_image: true`를 붙입니다. 본문이 없으면 `text`는 `""`로 보냅니다. `"[사진]"`으로 보내도 됩니다 (0.3.3).
 10. (0.3.4) `victim_in_room`이 `false`인 사건에서는 피해자용 기능(위로 메시지 등)을 이 방에서 띄우지 않습니다. 방에 없는 아이에게 무엇을 할지는 아직 정해지지 않았습니다. 부분 방 테스트에서 빠진 아이를 `participants`에 일부러 넣을 필요가 없습니다.
 11. (0.3.5) 앱에서 바꿀 것은 없습니다. `victim_reason`에 `direct_address`가 새로 올 수 있습니다. 대사가 없는 아이(배제 대본의 피해자)를 검사방 구성원으로 `participants`에 넣어 보내는 지금 방식 그대로 쓰면 됩니다. 이 경우 `victim_in_room`은 `true`입니다.
+12. (0.3.6) `/analyze` 요청마다 `classmates`에 이 방이 속한 학급의 현재 구성원(`participant_code`, `display_name`)을 앱 DB 기준으로 넣습니다. `participants`는 지금처럼 방 구성원만 보냅니다. `attack_notes`에 `absent_classmate`가 새로 올 수 있습니다.
 9. (0.3.3) 앱에서 바꿀 것은 없습니다. 전송 전 호출의 시간 초과 처리는 그대로 두세요. `module_scores.context`가 `null`일 수 있습니다.
 
 ## 10. 알려진 제약
@@ -423,7 +444,7 @@ Link: https://pregnant-foam-preventing-info.trycloudflare.com
 - **주소가 바뀝니다.** 현재 임시 Cloudflare 터널이라 서버를 다시 켜면 기본 주소가 바뀝니다.
 - **피해자 식별의 한계.** 피해자가 말하지 않고 이름도 불리지 않으면 사건이 열리지 않습니다. 실명·별명으로 부르면 `aliases`에 있어야 이름으로 잡힙니다.
 - **방향 판정은 낱말 규칙입니다 (0.3.2).** 항의·맞장구·무마·말리기를 정해진 표현으로 찾습니다. 목록에 없는 표현은 평범한 반응으로 처리됩니다. 말리는 주변인이 "하지 마"처럼 피해자와 같은 표현만 쓰면 피해자 후보로 잡힐 수 있습니다. 그래서 반응만으로 잡힌 피해자는 `provisional`로 표시합니다.
-- **방에 없는 피해자.** 대화방에 없어도 `participants`에 있으면 이름으로 피해자로 지목됩니다. `participants`에 없으면 사건이 열리지 않습니다 (예전처럼 같은 편 아이가 피해자로 잡히지는 않습니다). 방에 없는 아이에게 무엇을 보낼지는 정해지지 않았습니다.
+- **방에 없는 피해자.** `participants`나 `classmates`(0.3.6)에 있으면 이름으로 피해자로 지목됩니다. 둘 다 없으면 사건이 열리지 않습니다. 방에 없는 아이는 반응을 볼 수 없어서 이름이 2번 이상 나와야 하고, 닉네임과 다른 실명·별명으로 부르면 찾지 못합니다. 학급 명단이 클수록 닉네임이 평범한 낱말(예: `하늘`)인 아이가 잘못 지목될 수 있습니다. 방에 없는 아이에게 무엇을 보낼지는 정해지지 않았습니다.
 - **시각적 폭력.** 서버는 이미지 내용을 보지 않습니다. `has_image`와 뒤따르는 항의·무마 발화로만 판단합니다. 이름·답장 지목이 없으면 공격으로 센 메시지가 4개 이상이어야 열립니다.
 - **방 기록도 메모리에만 있습니다.** 서버 재시작 시 방별 최근 메시지와 명단이 사라집니다.
 - **대화방당 사건 하나.** 같은 방에서 공격이 이어지면 같은 사건에 더해집니다. 새 공격 없이 30분이 지나면 사건이 닫힙니다.
@@ -474,6 +495,8 @@ curl https://<터널이 출력한 주소>.trycloudflare.com/health
 | `WITHU_ENABLE_EXCLUSION_RULE` | 1 | `0`이면 배제 발화 규칙 끔 |
 | `WITHU_EXCLUSION_LLM` | 1 | `0`이면 배제 발화를 LLM으로 확인하지 않고 규칙대로 셈 (0.3.4) |
 | `WITHU_ENABLE_SUBROOM` | 1 | `0`이면 부분 방 연결 끔 (0.3.4) |
+| `WITHU_ENABLE_CLASSMATES` | 1 | `0`이면 `classmates`를 받아도 쓰지 않음 (0.3.6) |
+| `WITHU_ABSENT_MIN_MENTIONS` | 2 | 방에 없는 아이: 사건이 열리는 데 필요한 '그 아이의 이름이 나온 공격' 수 (0.3.6) |
 | `WITHU_SUBROOM_MAX_MISSING`, `WITHU_SUBROOM_MIN_MEMBERS` | 2, 3 | 부분 방으로 보는 조건: 빠진 아이 수의 상한, 방의 최소 인원 (0.3.4) |
 | `WITHU_STRONG_MIN_PROTESTS` | 2 | `confirmed`에 필요한 피해자 본인의 항의 메시지 수 |
 | `WITHU_ENABLE_ADDRESS` | 1 | `0`이면 2인칭 지목(`direct_address`) 끔 (0.3.5) |
@@ -517,6 +540,16 @@ curl https://<터널이 출력한 주소>.trycloudflare.com/health
 | 침묵 타이머 30초·60초, 알림 최대 2회 | 통과 |
 | 방관→방어 전환과 긍정 피드백 | 통과 |
 
+**v0.3.6 확인 (2026-10-15)**
+
+| 확인 | 결과 |
+| --- | --- |
+| 새 단위 테스트 (`test_classmates.py`, 요청을 `AnalyzeRequest`로 검사한 뒤 넘김) | 17/17 |
+| 기존 단위 테스트 5종 (`test_target_resolver`, `test_victim_direction`, `test_report2`, `test_exclusion`, `test_report3`) | 모두 통과, 0.3.5와 같음 |
+| 실서버 | 아직. 서버에서 `python test_classmates.py`를 먼저 돌린 뒤 앱팀 요청으로 확인 |
+
+모듈 A 점수는 대본에 적은 값입니다. "○○ 진짜 짜증나"가 실제 모델에서 0.5를 넘는지는 실서버에서 확인해야 합니다.
+
 **v0.3.5 확인 (2026-10-08)**
 
 앱팀이 보낸 재현 요청 순서 JSON 9편을 서버 없이 다시 돌려 확인했습니다. **실제 모델 점수로는 확인하지 못했습니다.** 모듈 A 점수는 가정한 값입니다 (욕설이 있는 줄과 보고된 두 줄은 높게, 나머지 줄은 여러 가정으로).
@@ -558,6 +591,7 @@ python withu/test_victim_direction.py     # 19개
 python test_report2.py                    # 앱팀 2차 보고 항목 32개
 python test_exclusion.py                  # 배제 탐지 1단계 19개 (0.3.4)
 python test_report3.py                    # 앱팀 3차 보고 항목 68개 (0.3.5)
+python test_classmates.py                 # 방에 없는 같은 반 아이 17개 (0.3.6)
 python -m withu.phase4_bystander          # LLM이 실제로 답하는지 (오류면 이유가 찍힘)
 ```
 
