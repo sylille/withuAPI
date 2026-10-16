@@ -7,6 +7,7 @@ Run (ONE worker — the 방관 tracker keeps state in memory):
 The WithU backend POSTs a message + recent context to /analyze and gets back a
 cyberbullying judgment. v0.3.0 adds the 방관행동 판정부:
     /analyze (track_bystander=true)  -> opens/extends incidents, judges bystanders who talk
+    /analyze (track_bystander=false) -> v0.3.7: bystander_preview (이 메시지가 동조로 판정될지, 기록 없음)
     POST /bystander/events           -> read / leave / reaction / defense events from the app
     GET  /bystander/actions          -> 30 s / 60 s nudges, summary, badge, choices to show
 """
@@ -23,7 +24,7 @@ from .bystander_api import router as bystander_router, tracker
 from .target_resolver import set_request_context, set_exclusion_judge
 from . import models
 
-app = FastAPI(title="WithU Talk AI 추론 서버", version="0.3.6")
+app = FastAPI(title="WithU Talk AI 추론 서버", version="0.3.7")
 _llm = None            # phase4_bystander 모듈 (ENABLE_BYSTANDER=1일 때)
 app.include_router(bystander_router)
 _ensemble: Ensemble | None = None
@@ -105,6 +106,8 @@ def health():
         out["bystander_llm"] = "off"
     else:
         out["bystander_llm"] = _llm.STATUS["state"]
+        if _llm.STATUS.get("last_ms") is not None:    # v0.3.7: 마지막 LLM 판정에 걸린 시간 (전송 전 미리 판정의 대기 시간)
+            out["bystander_llm_last_ms"] = _llm.STATUS["last_ms"]
         if _llm.STATUS["error"]:
             out["bystander_llm_error"] = _llm.STATUS["error"]
     return out
@@ -128,4 +131,15 @@ def analyze(req: AnalyzeRequest):
                        if b["participant_code"] == req.new_message.participant_code), None)
             if me and me["behavior"]:
                 result["bystander_behavior"] = me["behavior"]
+    else:
+        # v0.3.7: 전송 전 호출. 사건이 열린 방의 주변인이면 이 메시지가 어떻게 판정될지 미리 알려 준다 (기록하지 않음)
+        try:
+            p = tracker.preview(body)
+        except Exception as e:                   # never break /analyze because of the tracker
+            print("[bystander] preview error:", e)
+            p = None
+        if p:
+            result["bystander_preview"] = p["label"]
+            result["bystander_preview_source"] = p["source"]
+            result["incident_id"] = p["incident_id"]
     return AnalyzeResponse(**result)
