@@ -52,15 +52,26 @@ v0.3.5
 ------
   * victim_reason에 direct_address(2인칭 지목)가 더해졌다. 세기는 repeated_target과 같고, 본인의 분명한 항의가 더해지면
     (attribution.victim_support=strong) confirmed가 된다.
+
+v0.3.7 — 전송 전 동조 미리 판정
+------------------------------
+  * preview(): 전송 전 호출(track_bystander=false)에서 "이 메시지를 보내면 방어·동조·방관 중 무엇으로 판정될지"를
+    미리 돌려준다. 상태는 하나도 바꾸지 않는다 (노출·판정·알림·기록 없음).
+  * 시간 예산(BYSTANDER_PREVIEW_TIMEOUT_SEC, 기본 1.5초) 안에 LLM이 답하지 못하면 키워드 규칙으로 답하고,
+    LLM은 뒤에서 마저 돈다.
+  * 같은 사건·같은 맥락·같은 본문의 판정은 잠시(BYSTANDER_PREVIEW_CACHE_SEC, 기본 120초) 기억했다가 전송 후 호출이
+    그대로 쓴다. 경고와 기록이 같은 판정을 따르고, LLM도 메시지당 한 번만 부른다.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
+import hashlib
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutTimeout
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Optional
@@ -87,6 +98,8 @@ VICTIM_RANK = {"explicit_target": 3, "name_mention": 2, "distress_signal": 1, "r
 VICTIM_CONFIRM_RANK     = 2       # 이 세기 이상이면 confirmed (또는 attribution.victim_support == "strong")
 VICTIM_SWITCH_SAME      = int(os.environ.get("BYSTANDER_VICTIM_SWITCH_SAME", 2))       # 같은 세기: 연속 판정 수
 VICTIM_SWITCH_WEAKER    = int(os.environ.get("BYSTANDER_VICTIM_SWITCH_WEAKER", 3))     # 더 약한 세기: 연속 판정 수
+PREVIEW_TIMEOUT_SEC     = float(os.environ.get("BYSTANDER_PREVIEW_TIMEOUT_SEC", 1.5))  # v0.3.7: 전송 전 판정 시간 예산
+PREVIEW_CACHE_SEC       = float(os.environ.get("BYSTANDER_PREVIEW_CACHE_SEC", 120))    # v0.3.7: 판정 재사용 시간
 
 NUDGE_TEXT = {  # suggested copy; the app owns final wording
     "nudge_1": "가만히 있는다면 공격받는 친구가 힘들어 할거야.",
@@ -232,6 +245,11 @@ class BystanderTracker:
         self._actions: dict[str, list] = {}              # room -> queued actions
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # v0.3.7: 발화 판정 공유 (전송 전 미리 판정 -> 전송 후 기록)
+        self._pool = ThreadPoolExecutor(max_workers=int(os.environ.get("BYSTANDER_LLM_WORKERS", 8)),
+                                        thread_name_prefix="bystander-llm")
+        self._judged: dict = {}          # key -> (label, src, expires_at)
+        self._inflight: dict = {}        # key -> Future
 
     def set_classifier(self, fn: Optional[Callable]):
         self.classify = fn
@@ -307,13 +325,14 @@ class BystanderTracker:
                     elif result.get("bystander_behavior"):
                         self._apply_label(inc, b, result["bystander_behavior"], now, "391")
                     elif (new.get("text") or "").strip():           # 본문 없는 메시지(이미지)는 발화 판정을 하지 않는다
-                        pending = (inc.incident_id, self._classify_inputs(inc, req, speaker))
+                        inputs = self._classify_inputs(inc, req, speaker)
+                        pending = (inc.incident_id, inputs, self._judge_key(inc.incident_id, inputs))
             if pending is None:
                 return inc.to_dict() if inc else None
 
         # 3) LLM 판정은 잠금 밖에서 (v0.3.3). 그동안 다른 방의 요청과 타이머는 계속 돈다.
-        iid, inputs = pending
-        label, src = self._run_classifier(*inputs)
+        iid, inputs, key = pending
+        label, src = self._classify_shared(key, inputs)       # 전송 전에 미리 판정했으면 그 결과를 쓴다
         with self._lock:
             inc = self.incidents.get(iid)
             if inc is None:
@@ -323,6 +342,68 @@ class BystanderTracker:
                 if b.stage != "unseen":
                     self._apply_label(inc, b, label, now if fixed_now else time.time(), src)
             return inc.to_dict()
+
+    # ------------------------------------------------------------------ public: 전송 전 미리 판정 (v0.3.7)
+    def preview(self, req: dict, now: Optional[float] = None, timeout: Optional[float] = None) -> Optional[dict]:
+        """전송 전 호출용. 이 메시지가 전송 후 호출에서 어떻게 판정될지 미리 돌려준다. 상태는 바꾸지 않는다.
+        사건이 열린 방에서 주변인이 본문 있는 메시지를 보낼 때만 판정하고, 아니면 None.
+        Returns {"label": 방어|동조|방관|비해당, "source": LLM|규칙|규칙(시간 초과)|방어 기능, "incident_id": ...}."""
+        room = req["room_id"]
+        new = req["new_message"]
+        speaker = new["participant_code"]
+        text = (new.get("text") or "").strip()
+        now = now if now is not None else time.time()
+        timeout = PREVIEW_TIMEOUT_SEC if timeout is None else timeout
+        with self._lock:
+            inc = self._active(room)
+            if inc is None or now - inc.last_anchor_ts >= INCIDENT_IDLE_CLOSE_SEC:   # 곧 닫힐 사건은 보지 않는다
+                return None
+            if inc.role_of(speaker) != "주변인":
+                return None
+            if new.get("is_defense_action"):
+                return {"label": "방어", "source": "방어 기능", "incident_id": inc.incident_id}
+            if not text:
+                return None
+            inputs = self._classify_inputs(inc, req, speaker)
+            key = self._judge_key(inc.incident_id, inputs)
+            iid = inc.incident_id
+        try:
+            label, src = self._classify_shared(key, inputs, timeout=timeout)
+        except _FutTimeout:                      # LLM은 뒤에서 마저 돌고, 끝나면 전송 후 호출이 그 결과를 쓴다
+            label, src = self._heuristic(inputs[2], inputs[3]), "규칙(시간 초과)"
+        return {"label": label, "source": src, "incident_id": iid}
+
+    @staticmethod
+    def _judge_key(iid: str, inputs: tuple) -> str:
+        turns, tagged, text, _ = inputs
+        raw = json.dumps([iid, turns, tagged, text.strip()], ensure_ascii=False)
+        return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+    def _classify_shared(self, key: str, inputs: tuple, timeout: Optional[float] = None) -> tuple:
+        """같은 판정은 한 번만 돌린다. 끝난 LLM 판정은 PREVIEW_CACHE_SEC 동안 재사용, 도는 중이면 그것을 기다린다.
+        timeout 안에 끝나지 않으면 concurrent.futures.TimeoutError (판정은 계속 돈다)."""
+        now = time.time()
+        with self._lock:
+            for k in [k for k, v in self._judged.items() if v[2] <= now]:
+                self._judged.pop(k, None)
+            hit = self._judged.get(key)
+            if hit:
+                return hit[0], hit[1]
+            fut = self._inflight.get(key)
+            if fut is None:
+                fut = self._pool.submit(self._run_classifier, *inputs)
+                self._inflight[key] = fut
+                fut.add_done_callback(lambda f, k=key: self._remember_judgment(k, f))
+        return fut.result(timeout=timeout)
+
+    def _remember_judgment(self, key: str, fut):
+        with self._lock:
+            self._inflight.pop(key, None)
+            if fut.cancelled() or fut.exception() is not None:
+                return
+            label, src = fut.result()
+            if src == "LLM":                     # 규칙 판정은 기억하지 않는다 (다음 호출이 LLM을 다시 시도)
+                self._judged[key] = (label, src, time.time() + PREVIEW_CACHE_SEC)
 
     # ------------------------------------------------------------------ public: app events
     def on_event(self, ev: dict, now: Optional[float] = None) -> list:

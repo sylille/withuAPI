@@ -59,5 +59,8 @@ class AnalyzeResponse(BaseModel):
     evidence: str
     incident_id: Optional[str] = None                        # NEW
     bystander_state: Optional[Dict[str, Any]] = None         # NEW: incident + per-bystander stage
+    # v0.3.7: 전송 전 호출(track_bystander=false)에서만. 이 메시지를 보내면 받을 판정 (기록되지 않음)
+    bystander_preview: Optional[str] = Field(None, description="방어 | 동조 | 방관 | 비해당 | None")
+    bystander_preview_source: Optional[str] = Field(None, description="LLM | 규칙 | 규칙(시간 초과) | 방어 기능")
     participants: List[Participant] = Field(default_factory=list)
 

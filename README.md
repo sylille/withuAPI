@@ -1,18 +1,18 @@
-# 위드유톡 AI 추론 서버 API 문서 v0.3.6
+# 위드유톡 AI 추론 서버 API 문서 v0.3.7
 
-Oct 15, 2026 
+Oct 16, 2026 
 
 Link: https://remedy-fashion-voices-yards.trycloudflare.com
 
 ## 1. 개요
 
-위드유톡 AI 추론 서버는 대화방 메시지를 받아 사이버불링 여부와 가해자·피해자를 판정합니다. 사건이 열려 있는 동안에는 주변인의 방어·동조·방관 행동을 추적해, 앱이 아이에게 보여 줄 알림을 돌려줍니다. v0.3.0은 v0.2.0에 방관행동 판정부(`/bystander/*`)를 더한 버전이고, v0.3.1은 피해자 식별을 보강했습니다. v0.3.2는 가해자·피해자 방향이 틀리던 문제를 고치고, 사건이 열린 뒤에도 피해자를 바로잡습니다. v0.3.3은 전송 전 호출 지연, 빈 본문 오류, 짧은 대화의 점수, 피해자 확정, 배제 대본을 고쳤습니다. v0.3.5는 이름이 안 나오는 대화의 피해자 식별(2인칭 지목), 말리던 아이가 피해자로 바뀌던 문제, 배제 대본의 공동 가해자를 고쳤습니다. v0.3.6은 같은 반이지만 방에 없는 아이도 피해자로 찾습니다 (§4 방에 없는 아이, §9).
+위드유톡 AI 추론 서버는 대화방 메시지를 받아 사이버불링 여부와 가해자·피해자를 판정합니다. 사건이 열려 있는 동안에는 주변인의 방어·동조·방관 행동을 추적해, 앱이 아이에게 보여 줄 알림을 돌려줍니다. v0.3.0은 v0.2.0에 방관행동 판정부(`/bystander/*`)를 더한 버전이고, v0.3.1은 피해자 식별을 보강했습니다. v0.3.2는 가해자·피해자 방향이 틀리던 문제를 고치고, 사건이 열린 뒤에도 피해자를 바로잡습니다. v0.3.3은 전송 전 호출 지연, 빈 본문 오류, 짧은 대화의 점수, 피해자 확정, 배제 대본을 고쳤습니다. v0.3.5는 이름이 안 나오는 대화의 피해자 식별(2인칭 지목), 말리던 아이가 피해자로 바뀌던 문제, 배제 대본의 공동 가해자를 고쳤습니다. v0.3.6은 같은 반이지만 방에 없는 아이도 피해자로 찾습니다 (§4 방에 없는 아이, §9). v0.3.7은 전송 전 호출에서 주변인의 메시지가 동조로 판정될지 미리 알려 줍니다 (§4 동조 미리 판정).
 
 | 항목 | 값 |
 | --- | --- |
 | 기본 주소 | 페이지 맨 위 링크 (임시 터널) |
 | 형식 | JSON, UTF-8 (`Content-Type: application/json; charset=utf-8`) |
-| 서버 버전 | 0.3.6 |
+| 서버 버전 | 0.3.7 |
 
 **개인정보 원칙**
 
@@ -34,7 +34,7 @@ Link: https://remedy-fashion-voices-yards.trycloudflare.com
 `ensemble_ready`와 `bystander_tracker`가 모두 `true`이고 `bystander_llm`이 `ok`여야 정상입니다. `bystander_tracker`가 `false`이면 30초·60초 알림이 나가지 않습니다.
 
 ```json
-{ "status": "ok", "version": "0.3.6", "ensemble_ready": true, "bystander_tracker": true, "bystander_llm": "ok" }
+{ "status": "ok", "version": "0.3.7", "ensemble_ready": true, "bystander_tracker": true, "bystander_llm": "ok", "bystander_llm_last_ms": 820 }
 ```
 
 | 필드 | 설명 |
@@ -42,6 +42,7 @@ Link: https://remedy-fashion-voices-yards.trycloudflare.com
 | `ensemble_ready` | 판정 모델(모듈 A·B·D)이 모두 로드됨 |
 | `bystander_tracker` | 방관행동 타이머 스레드가 실행 중 |
 | `bystander_llm` | 주변인 발화 판정 LLM(모듈 D)의 상태 (0.3.3). `ok`, `error`(이유는 `bystander_llm_error`), `unknown`(아직 호출 전), `off`. `error`여도 서버는 키워드 규칙으로 판정을 계속합니다 |
+| `bystander_llm_last_ms` | 마지막 LLM 판정에 걸린 시간(밀리초) (0.3.7). 전송 전 동조 미리 판정의 대기 시간이 대략 이만큼입니다. LLM을 아직 부르지 않았으면 없음 |
 
 ## 4. `POST /analyze` — 메시지 판정
 
@@ -127,7 +128,9 @@ Link: https://remedy-fashion-voices-yards.trycloudflare.com
 | `suppressed` | 위로·방어 발화로 판단되어 점수가 억제되었으면 `true` |
 | `guard_reason` | 억제 사유. 없으면 `none`. `defense_action`, `prosocial_content`(위로), `resistance`(항의·말리기, 0.3.3) |
 | `incident_id` | 이 대화방에 진행 중인 사건 ID. 없으면 `null` |
-| `bystander_behavior` | 발신자가 주변인이면 현재 판정: `방어`, `동조`, `방관`, 또는 `null` |
+| `bystander_behavior` | 발신자가 주변인이면 현재 판정: `방어`, `동조`, `방관`, 또는 `null`. 전송 후 호출에서만 옵니다 |
+| `bystander_preview` | **전송 전 호출에서만** (0.3.7). 이 메시지를 보내면 받을 판정: `동조`, `방어`, `방관`(무관한 대화), `비해당`. 사건이 열린 방의 주변인이 본문 있는 메시지를 보낼 때만 오고, 아니면 `null`. 기록되지 않습니다 (§4 동조 미리 판정) |
+| `bystander_preview_source` | `bystander_preview`를 정한 방법: `LLM`, `규칙`(LLM이 꺼졌거나 실패), `규칙(시간 초과)`(LLM이 시간 예산 안에 답하지 못함), `방어 기능`(`is_defense_action: true`) |
 | `bystander_state` | 사건과 주변인별 상태 (§7과 같은 형식). 연구 로그용, 아동에게 노출 금지 |
 | `module_scores` | 모듈별 점수. 디버그용. `context`는 대화가 4개보다 짧으면 `null`입니다 (0.3.3) |
 | `evidence` | 판정 근거 한 줄 (한국어) |
@@ -158,7 +161,7 @@ Link: https://remedy-fashion-voices-yards.trycloudflare.com
 
 ### 쓰는 법
 
-- **전송 전 경고** (`track_bystander: false`): `cb_score`, `cb_type`, `suppressed`만 씁니다. 가드가 이미 적용되어 위로 메시지에는 경고가 나가지 않습니다.
+- **전송 전 경고** (`track_bystander: false`): `cb_score`, `cb_type`, `suppressed`로 공격 메시지 경고를, `bystander_preview == "동조"`로 동조 경고를 띄웁니다 (0.3.7). 가드가 이미 적용되어 위로 메시지에는 경고가 나가지 않습니다.
 - **전송 후 개입** (`track_bystander: true`): `attribution.is_bullying`이 `true`일 때만 가해자·피해자 기반 기능을 켭니다. `false`일 때의 `aggressors`, `victim`은 잠정값입니다.
 - `cb_score` 하나로 개입하지 마세요. 평범한 대화도 0.5 안팎이 나올 수 있습니다 (§10).
 - 챗봇 선택지로 보낸 위로 메시지는 `is_defense_action: true`로 보내세요. 이 표시가 없으면 가드가 덜 확실하게 작동합니다.
@@ -190,6 +193,24 @@ Link: https://remedy-fashion-voices-yards.trycloudflare.com
 - 같은 반 아이의 이름 조각이 방 구성원의 것과 같으면(방에 김하늘, 방 밖에 박하늘이 있을 때 "하늘이") 방 구성원으로 봅니다. "박하늘"처럼 성까지 쓰면 박하늘로 찾습니다.
 - 응답의 `victim_in_room`은 `false`, `attack_notes`에 `absent_classmate`가 들어갑니다. 이 방에서 말한 아이는 `participants`에 빠져 있어도 방에 있는 아이로 봅니다.
 - 주변인 판정(방어·동조·방관)과 알림은 방에 있는 아이들에게 평소처럼 나갑니다. 피해자용 기능은 이 방에서 띄우지 않습니다 (§9 앱이 할 일 10).
+
+### 동조 미리 판정 (0.3.7)
+
+사건이 열린 방에서 주변인이 메시지를 보내기 전에, 그 메시지가 전송 후 호출에서 `동조`로 판정될지 알려 줍니다. 앱은 이것으로 보내기 전에 경고를 띄웁니다.
+
+```
+1. 아이가 보내기 버튼을 누름
+2. 전송 전 호출 (track_bystander: false)  →  bystander_preview == "동조"이면 경고
+3. 아이가 그래도 보내면 메시지 저장, 친구들에게 보임       (취소하면 3·4 없음 → 아무것도 기록되지 않음)
+4. 전송 후 호출 (track_bystander: true)   →  지금처럼 bystander_behavior로 기록, join_feedback 알림
+```
+
+- 전송 전 호출은 아무것도 바꾸지 않습니다. 주변인 노출, 판정, 알림, 타이머가 모두 그대로입니다. 보내지 않고 취소하면 그 메시지는 없던 일입니다.
+- 판정 방법은 전송 후 호출과 같습니다 (같은 LLM, 같은 역할 표시 맥락). 같은 사건·같은 `context`·같은 본문이면 2분 동안 그 판정을 기억했다가 전송 후 호출이 그대로 씁니다. 그래서 **경고와 기록이 같은 판정**이고, 전송 후 호출은 LLM을 다시 기다리지 않습니다. 2번과 4번의 `context`가 다르면(그 사이 다른 메시지가 끼면) 4번에서 다시 판정합니다.
+- **응답 시간.** LLM을 부르는 경우(사건이 열린 방의 주변인 메시지)에만 LLM 한 번만큼 늘어납니다. 기본 시간 예산은 **1.5초**입니다. 그 안에 LLM이 답하지 못하면 키워드 규칙으로 답하고(`bystander_preview_source: "규칙(시간 초과)"`), LLM은 뒤에서 마저 돌아 4번에서 그 결과로 기록합니다. 사건이 없는 방, 가해자·피해자의 메시지, 이미지에는 LLM을 부르지 않아 지금과 같습니다. 실제 대기 시간은 `/health`의 `bystander_llm_last_ms`로 볼 수 있습니다.
+- 키워드 규칙은 가해자 바로 뒤의 맞장구·웃음("ㅋㅋ", "ㅇㅈ", "인정", "맞아")만 동조로 봅니다. 다른 아이가 사이에 말했으면 규칙은 `비해당`을 돌려주니, 시간 초과일 때는 동조를 놓칠 수 있습니다.
+- `방관`은 무관한 대화라는 뜻입니다. 경고는 `동조`일 때만 띄우세요.
+- 가해자의 메시지에는 `bystander_preview`가 오지 않습니다. 가해자에게는 지금처럼 `cb_score`로 경고합니다.
 
 ### 사건이 열리는 조건
 
@@ -381,6 +402,9 @@ Link: https://remedy-fashion-voices-yards.trycloudflare.com
 
 | 구분 | 항목 | 내용 |
 | --- | --- | --- |
+| 추가 (0.3.7) | `bystander_preview`, `bystander_preview_source` (응답) | 전송 전 호출에서 주변인 메시지가 동조로 판정될지 미리 알려 줌. 기록하지 않음 (§4 동조 미리 판정) |
+| 변경 (0.3.7) | 전송 전 호출의 LLM | 사건이 열린 방의 주변인 메시지에 한해 전송 전 호출에서도 LLM을 부름 (시간 예산 1.5초). 그 판정을 전송 후 호출이 다시 씀 |
+| 추가 (0.3.7) | `/health`의 `bystander_llm_last_ms` | 마지막 LLM 판정에 걸린 시간 |
 | 추가 (0.3.6) | `classmates` (요청), `attack_notes`의 `absent_classmate` | 같은 반이지만 방에 없는 아이도 피해자 후보. 다른 방의 명단이 없어도 됨 (§4 방에 없는 아이) |
 | 변경 (0.3.6) | 방에 없는 피해자 | 그 아이의 이름이 나온 공격이 2개 이상이어야 사건이 열림 (부분 방 포함). 0.3.4는 이름이 한 번 나오고 다른 공격이 하나 더 있어도 열렸음 |
 | 추가 (0.3.5) | `victim_reason: direct_address` | 이름이 안 나와도 2인칭("니가 뭔 상관인데")으로 향한 공격과 그 아이의 항의로 사건이 열림 (§4 사건이 열리는 조건). 사용성 평가 대본에서 사건이 열리지 않던 문제 |
@@ -496,6 +520,8 @@ curl https://<터널이 출력한 주소>.trycloudflare.com/health
 | `WITHU_EXCLUSION_LLM` | 1 | `0`이면 배제 발화를 LLM으로 확인하지 않고 규칙대로 셈 (0.3.4) |
 | `WITHU_ENABLE_SUBROOM` | 1 | `0`이면 부분 방 연결 끔 (0.3.4) |
 | `WITHU_ENABLE_CLASSMATES` | 1 | `0`이면 `classmates`를 받아도 쓰지 않음 (0.3.6) |
+| `BYSTANDER_PREVIEW_TIMEOUT_SEC` | 1.5 | 전송 전 동조 미리 판정의 시간 예산(초). 넘으면 키워드 규칙으로 답함 (0.3.7). `0`이면 LLM을 기다리지 않고 늘 규칙으로 답함 |
+| `BYSTANDER_PREVIEW_CACHE_SEC` | 120 | 미리 판정한 결과를 전송 후 호출이 다시 쓰는 시간(초) (0.3.7) |
 | `WITHU_ABSENT_MIN_MENTIONS` | 2 | 방에 없는 아이: 사건이 열리는 데 필요한 '그 아이의 이름이 나온 공격' 수 (0.3.6) |
 | `WITHU_SUBROOM_MAX_MISSING`, `WITHU_SUBROOM_MIN_MEMBERS` | 2, 3 | 부분 방으로 보는 조건: 빠진 아이 수의 상한, 방의 최소 인원 (0.3.4) |
 | `WITHU_STRONG_MIN_PROTESTS` | 2 | `confirmed`에 필요한 피해자 본인의 항의 메시지 수 |
@@ -539,6 +565,15 @@ curl https://<터널이 출력한 주소>.trycloudflare.com/health
 | 퇴장·비정상 종료·재입장·지연 목격 요약 | 통과 |
 | 침묵 타이머 30초·60초, 알림 최대 2회 | 통과 |
 | 방관→방어 전환과 긍정 피드백 | 통과 |
+
+**v0.3.7 확인 (2026-10-16)**
+
+| 확인 | 결과 |
+| --- | --- |
+| 새 단위 테스트 (`test_preview.py`, LLM은 지연을 흉내 낸 가짜 함수) | 26/26. 보고된 세 메시지가 전송 전 `동조`, 전송 전 호출 뒤 상태·알림 변화 없음, 그래도 보내면 같은 판정으로 기록되고 LLM은 한 번, 시간 초과 시 규칙으로 답하고 기록은 LLM 결과 |
+| 실제 FastAPI 앱 + 가짜 모델로 HTTP 확인 | 전송 전 응답에 `bystander_preview: "동조"`, 전송 후 `bystander_behavior: "동조"`, 전송 후 호출은 LLM을 다시 부르지 않음 |
+| 기존 단위 테스트 6종 | 모두 통과, 0.3.6과 같음 |
+| 실서버 | 아직. 실제 LLM 응답 시간은 서버에서 `/health`의 `bystander_llm_last_ms`로 확인 |
 
 **v0.3.6 확인 (2026-10-15)**
 
@@ -592,6 +627,7 @@ python test_report2.py                    # 앱팀 2차 보고 항목 32개
 python test_exclusion.py                  # 배제 탐지 1단계 19개 (0.3.4)
 python test_report3.py                    # 앱팀 3차 보고 항목 68개 (0.3.5)
 python test_classmates.py                 # 방에 없는 같은 반 아이 17개 (0.3.6)
+python test_preview.py                    # 전송 전 동조 미리 판정 26개 (0.3.7)
 python -m withu.phase4_bystander          # LLM이 실제로 답하는지 (오류면 이유가 찍힘)
 ```
 
