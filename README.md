@@ -2,7 +2,7 @@
 
 Oct 16, 2026 
 
-Link: https://remedy-fashion-voices-yards.trycloudflare.com
+Link: https://ranked-ian-flat-gone.trycloudflare.com
 
 ## 1. 개요
 
