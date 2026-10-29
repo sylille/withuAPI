@@ -24,6 +24,8 @@ Env (provider is picked automatically from whichever key is set; Anthropic wins 
 
 v0.3.8: 답장 대상(reply)을 받는다. LLM은 target(누구를 향한 말인가)·stance(태도)·label을 함께 내고,
         reconcile()이 4장 표3에 맞지 않는 동조를 고친다 (가해자 비판 -> 방어, 대상 불명 -> 비해당).
+        연구진 기준(10-29): 가해자에 대한 공개적 반대·핀잔("○○ 이상해", "○○ 뭐라는 거야")은 방어,
+        가해자에게 욕설을 쓰면 방어가 아니라 비해당.
         무관한 이야기는 직전에 화제를 돌렸어도 방관, 짧은 감탄사는 비해당으로 예시를 더했다.
 v0.3.3: 실패하면 빨리 끝낸다. 예전에는 실패할 때마다 1.5·3·4.5초를 쉬어 한 번에 9초가 걸렸고,
         실패 사실이 어디에도 남지 않았다. 이제 마지막 오류를 STATUS에 남기고(/health에서 보임) 로그에 찍는다.
@@ -52,16 +54,18 @@ RUBRIC = """너는 초등학생 단체 채팅방에서 '사이버불링이 진�
 먼저 두 가지를 정한다.
 - target: 대상 발화가 향하는 사람 = 가해자 | 피해자 | 주변인 | 전체 | 없음
   (답장 대상 > 본문에 나온 아이 > 바로 앞 발화 순으로 본다. 누구에게 하는 말인지 특정되지 않으면 없음)
-- stance: 그 사람에 대한 태도 = 지지(동의·호응·웃어 주기·편들기) | 비판(탓하기·항의·깎아내리기) | 조롱(비웃기·놀리기) | 중립
+- stance: 그 사람에 대한 태도 = 지지(동의·호응·웃어 주기·편들기) | 비판(탓하기·항의·반대·핀잔) | 조롱(비웃기·놀리기) | 욕설(욕·비속어로 공격) | 중립
 그다음 라벨을 정한다.
-- 방어: 가해 중단 요구, 가해자에 대한 비판·항의·탓하기, 피해자 지지·위로·편들기, 어른에게 알리기,
+- 방어: 가해 중단 요구, 가해자에 대한 공개적인 반대·비판·항의·핀잔 (예: "○○ 이상해", "○○ 그만해", "○○ 뭐라는 거야"),
+        피해자 지지·위로·편들기, 어른에게 알리기,
         괴롭힘을 멈추자는 뜻이 드러난 화제 전환 (예: "그만해", "괜찮아?", "선생님께 말하자", "이 얘기는 여기까지 하자")
 - 동조: 가해자의 공격에 대한 웃음·호응·동의·강화, 가해 표현 따라하기, 피해자 탓·비난·조롱 (예: "ㅋㅋㅋ", "ㅇㅈ", "맞아", "예민하네")
 - 방관: 사이버불링과 무관한 이야기 (괴롭힘을 멈추자는 말 없이 다른 이야기를 함)
 - 비해당: 주변인 반응으로 보기 어려움 (상황을 묻기만 하는 질문, 누구에게 하는 말인지 모를 짧은 감탄사·추임새 등)
 핵심 규칙:
 1) 같은 말이라도 '누구를 향한 말인가'에 따라 라벨이 달라진다. 피해자를 탓하면 동조, 가해자를 탓하면 방어다.
-   가해자를 향한 비판·탓·깎아내리는 말은 절대 동조가 아니다.
+   가해자를 향한 반대·비판·핀잔은 절대 동조가 아니다.
+   단, 가해자에게 욕설·비속어를 쓰면(맞받아치기) 방어가 아니라 비해당이다. stance는 욕설로 적는다.
 2) 중단을 요구하면서 가해자에게 긍정적 반응을 함께 보이면("그만해 ㅋㅋ 근데 웃기긴 하다") 동조다.
 3) 피해자에게 참으라고 하거나 피해자 탓을 하면 방어가 아니다.
 4) 동조는 가해자 지지나 피해자 공격이 분명할 때만 고른다. 어떤 메시지에 호응하는지 특정되지 않거나 애매하면 비해당이다.
@@ -82,6 +86,10 @@ SHOTS = [
      "P06(주변인)", "너가 먼저 시작했잖아", "가해자", "비판", "방어"),
     ([("P11(가해자)", "[사진]"), ("P06(주변인)", "사진 내려")], None,
      "P06(주변인)", "P11(가해자)이 좀 이상한 듯", "가해자", "비판", "방어"),
+    ([("P11(가해자)", "P02(피해자) 말투 진짜 웃기지 않냐"), ("P02(피해자)", "...")], None,
+     "P07(주변인)", "P11(가해자) 뭐라는 거야", "가해자", "비판", "방어"),
+    ([("P11(가해자)", "P02(피해자) 진짜 짜증나"), ("P02(피해자)", "왜 나한테만 그래")], None,
+     "P08(주변인)", "P11(가해자) 닥쳐 병신아", "가해자", "욕설", "비해당"),
     ([("P11(가해자)", "P02(피해자) 같은 애랑 누가 놀아")], None,
      "P03(주변인)", "ㅋㅋㅋㅋ 인정", "가해자", "지지", "동조"),
     ([("P11(가해자)", "역겨우니까 나가라")], None,
@@ -102,7 +110,11 @@ SHOTS = [
      "P05(주변인)", "헐 무섭다", "없음", "중립", "비해당"),
 ]
 TARGETS = ["가해자", "피해자", "주변인", "전체", "없음"]
-STANCES = ["지지", "비판", "조롱", "중립"]
+STANCES = ["지지", "비판", "조롱", "욕설", "중립"]
+# v0.3.8: 가해자에게 욕설을 쓴 말은 방어로 보지 않는다 (연구진 기준 2026-10-29). LLM이 놓쳐도 이 낱말이 있으면 고친다.
+_PROFANITY = re.compile(r"시발|씨발|ㅅㅂ|ㅆㅂ|병신|ㅂㅅ|새끼|ㅅㄲ|지랄|ㅈㄹ|꺼져|ㄲㅈ|닥쳐|닥치|ㄷㅊ|존나|ㅈㄴ|개새|애미|좆|등신|찐따")
+# "'병신'이라고 하지 마"처럼 욕을 옮겨 말하며 나무라는 경우는 빼고 본다
+_QUOTED = re.compile(r"[\'\"‘’“”]?\s*(?:이)?(?:라고|란|래|라는)")
 
 
 def _render_ctx(ctx) -> str:
@@ -136,13 +148,28 @@ def build_user_prompt(context, speaker, target_text, reply=None) -> str:
     return "# 분류할 항목\n" + _render_item(context, reply, speaker, target_text) + "\n\n" + OUTPUT_SPEC
 
 
-def reconcile(label, target, stance) -> tuple:
-    """v0.3.8: LLM의 (target, stance)와 라벨이 어긋나면 4장 표3에 맞춰 고친다. 동조 쪽만 고친다 (경고가 잘못 뜨는 비용이 크다).
+def has_profanity(text: str) -> bool:
+    """욕설이 있는가. 욕을 옮겨 말하는 경우("'병신'이라고 하지 마")는 세지 않는다."""
+    for m in _PROFANITY.finditer(text or ""):
+        if not _QUOTED.match(text, m.end()):
+            return True
+    return False
+
+
+def reconcile(label, target, stance, text: str = "") -> tuple:
+    """v0.3.8: LLM의 (target, stance)와 라벨이 어긋나면 4장 표3·연구진 기준에 맞춰 고친다.
+    동조는 분명할 때만 남긴다 (경고가 잘못 뜨는 비용이 크다). 가해자에게 욕설을 쓴 말은 방어가 아니다 (비해당).
     Returns (label, 고친 이유 | None)."""
+    if target == "가해자" and (stance == "욕설" or has_profanity(text)) and label in ("방어", "동조"):
+        return "비해당", "가해자에게 욕설: 방어로 보지 않음"
+    if label == "방어" and stance == "욕설":
+        return "비해당", "욕설: 방어로 보지 않음"
+    if label == "방어" and target is None and has_profanity(text):
+        return "비해당", "욕설: 방어로 보지 않음"
     if label != "동조":
         return label, None
     if target == "가해자" and stance in ("비판", "조롱"):
-        return "방어", "가해자를 향한 비판은 동조가 아님"
+        return "방어", "가해자를 향한 반대·비판은 동조가 아님"
     if target == "피해자" and stance == "지지":
         return "방어", "피해자 지지는 동조가 아님"
     if target == "없음" or stance == "중립":
@@ -171,7 +198,7 @@ def call_llm(system: str, user: str) -> str:
     return r.choices[0].message.content or ""
 
 
-def parse_label(txt: str):
+def parse_label(txt: str, text: str = ""):
     """-> (label, reason). v0.3.8: target·stance도 읽어 reconcile()로 맞춘다. reason에 target/stance를 붙여 둔다."""
     m = re.search(r"\{.*\}", txt or "", re.DOTALL)
     if m:
@@ -180,7 +207,7 @@ def parse_label(txt: str):
             if d.get("label") in LABELS:
                 tg = d.get("target") if d.get("target") in TARGETS else None
                 st = d.get("stance") if d.get("stance") in STANCES else None
-                label, fixed = reconcile(d["label"], tg, st)
+                label, fixed = reconcile(d["label"], tg, st, text)
                 why = f"[{tg}/{st}] {d.get('reason', '')}".strip()
                 if fixed:
                     why += f" (LLM 라벨 {d['label']} → {label}: {fixed})"
@@ -203,7 +230,7 @@ def classify_bystander(context, speaker, target_text, retries: int = None, reply
     t0 = time.time()
     for i in range(retries + 1):
         try:
-            out = parse_label(call_llm(SYSTEM, user))
+            out = parse_label(call_llm(SYSTEM, user), target_text)
             STATUS.update(state="ok", error=None, ok=STATUS["ok"] + 1, last_ms=int((time.time() - t0) * 1000))
             return out
         except Exception as e:

@@ -110,6 +110,20 @@ if "--live" not in sys.argv:
     lab, _ = parse_label('{"label":"방어","reason":"x"}')
     check("target/stance 없는 예전 형식도 읽음", lab == "방어")
 
+    print("\n3-1) 연구진 기준(10-29): 가해자에 대한 공개적 반대는 방어, 가해자에게 욕설은 방어 아님")
+    for t in ("P11(가해자) 이상해", "P11(가해자) 그만해", "P11(가해자)이 뭐라는거야"):
+        lab, why = parse_label('{"target":"가해자","stance":"비판","label":"방어","reason":"x"}', t)
+        check(f"'{t}' 가해자/비판 -> 방어", lab == "방어", why)
+    lab, why = parse_label('{"target":"가해자","stance":"조롱","label":"동조","reason":"x"}', "P11(가해자)이 뭐라는거야")
+    check("가해자/조롱으로 와도 동조 아님 -> 방어", lab == "방어", why)
+    for t in ("P11(가해자) 닥쳐 병신아", "그만해 이 새끼야", "P11(가해자) ㅅㅂ 그만하라고"):
+        lab, why = parse_label('{"target":"가해자","stance":"비판","label":"방어","reason":"x"}', t)
+        check(f"'{t}' LLM이 방어라 해도 욕설 -> 비해당", lab == "비해당", why)
+    lab, why = parse_label('{"target":"가해자","stance":"욕설","label":"방어","reason":"x"}', "P11(가해자) 진짜 ㄲㅈ")
+    check("stance=욕설 -> 비해당", lab == "비해당", why)
+    lab, why = parse_label('{"target":"가해자","stance":"비판","label":"방어","reason":"x"}', "\'병신\'이라고 하지 마")
+    check("욕을 옮겨 나무라는 말(\'병신\'이라고 하지 마) -> 방어 그대로", lab == "방어", why)
+
     print("\n4) 판정 근거가 남는다")
     cap = Capture(answer=("동조", "[피해자/조롱] 피해자를 비웃음"))
     tr, msgs, pl = room(cap, "P11", "P12", PARTS3, CTX4)
@@ -139,6 +153,10 @@ CASES = [  # (설명, 방, 가해자, 피해자, 명단, 맥락, 말한 아이, 
     ("사후검사1 '니가 잘못한거잖아' (태민에게 답장)", "P01", "P02", PARTS1, CTX1, "P04", "니가 잘못한거잖아", "a3", {"방어"}),
     ("사후검사1 '태민아 그만해'", "P01", "P02", PARTS1, CTX1, "P04", "태민아 그만해", None, {"방어"}),
     ("사후검사3 '유진이 이상함'", "P11", "P12", PARTS3, CTX3, "P13", "유진이 이상함", None, {"방어"}),
+    ("기준 '유진 이상해'", "P11", "P12", PARTS3, CTX3, "P13", "유진 이상해", None, {"방어"}),
+    ("기준 '유진 그만해'", "P11", "P12", PARTS3, CTX3, "P13", "유진 그만해", None, {"방어"}),
+    ("기준 '유진이 뭐라는거야'", "P11", "P12", PARTS3, CTX3, "P13", "유진이 뭐라는거야", None, {"방어"}),
+    ("기준 '유진 닥쳐 병신아' (욕설)", "P11", "P12", PARTS3, CTX3, "P13", "유진 닥쳐 병신아", None, {"비해당"}),
     ("사후검사3 '사진 지워줘'", "P11", "P12", PARTS3, CTX3[:2], "P13", "사진 지워줘", None, {"방어"}),
     ("사후검사4 '흠좀무'", "P11", "P12", PARTS3, CTX4, "P13", "흠좀무", None, {"비해당", "방관"}),
     ("사후검사4 '흠 좀 무섭군'", "P11", "P12", PARTS3, CTX4, "P13", "흠 좀 무섭군", None, {"비해당", "방관", "방어"}),
