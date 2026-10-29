@@ -24,7 +24,7 @@ from .bystander_api import router as bystander_router, tracker
 from .target_resolver import set_request_context, set_exclusion_judge
 from . import models
 
-app = FastAPI(title="WithU Talk AI 추론 서버", version="0.3.7")
+app = FastAPI(title="WithU Talk AI 추론 서버", version="0.3.8")
 _llm = None            # phase4_bystander 모듈 (ENABLE_BYSTANDER=1일 때)
 app.include_router(bystander_router)
 _ensemble: Ensemble | None = None
@@ -50,9 +50,9 @@ def build_ensemble() -> Ensemble:
         classify_bystander = _load_classify_bystander()
         # v0.3.3: LLM은 방관 판정부만 부른다 (사건이 열린 방에서 주변인이 말했을 때, 전송 후 호출에서만).
         # 예전에는 cb_score가 0.75 이상이면 전송 전 호출에서도, 가해자의 메시지에도 LLM을 불렀다.
-        def _classify(ctx, spk, txt):
-            label, why = classify_bystander(ctx, spk, txt)
-            return None if str(why).startswith("(error") else label     # None -> 판정부가 키워드 규칙으로 대신 판정
+        def _classify(ctx, spk, txt, reply=None):          # v0.3.8: 답장 대상, (label, 근거)를 돌려준다
+            label, why = classify_bystander(ctx, spk, txt, reply=reply)
+            return None if str(why).startswith("(error") else (label, why)   # None -> 판정부가 키워드 규칙으로 대신 판정
         tracker.set_classifier(_classify)
         # v0.3.4 (C1): 배제 발화 규칙에 걸린 메시지를 같은 LLM으로 확인한다 (정당한 목적이면 공격으로 세지 않음)
         from .phase4_bystander import judge_exclusion
@@ -141,5 +141,6 @@ def analyze(req: AnalyzeRequest):
         if p:
             result["bystander_preview"] = p["label"]
             result["bystander_preview_source"] = p["source"]
+            result["bystander_preview_reason"] = p.get("reason")
             result["incident_id"] = p["incident_id"]
     return AnalyzeResponse(**result)
