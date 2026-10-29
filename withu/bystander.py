@@ -61,6 +61,14 @@ v0.3.7 — 전송 전 동조 미리 판정
     LLM은 뒤에서 마저 돈다.
   * 같은 사건·같은 맥락·같은 본문의 판정은 잠시(BYSTANDER_PREVIEW_CACHE_SEC, 기본 120초) 기억했다가 전송 후 호출이
     그대로 쓴다. 경고와 기록이 같은 판정을 따르고, LLM도 메시지당 한 번만 부른다.
+
+v0.3.8 — 누구를 향한 말인지 알려 준다 (2026-10-28 사후검사 보고)
+--------------------------------------------------------------
+  * 답장이면 답장 대상 메시지와 그 화자의 역할을 LLM에 같이 보낸다. 예전에는 reply_to_message_id를 쓰지 않아,
+    가해자에게 단 "니가 잘못한거잖아"가 피해자 탓(4장 표3의 방어 제외 사례)으로 읽혀 동조가 되었다.
+  * 맥락·답장·대상 발화 속 아이 이름을 "코드(역할)"로 바꿔 보낸다. 예전에는 맥락에 코드만 있고 본문에는 이름이 있어
+    "유진이 이상함"의 유진이 가해자인지 LLM이 알 수 없었다. 아이 이름이 LLM으로 나가지 않는 효과도 있다.
+  * LLM이 준 근거(reason)를 버리지 않는다: history("판정 근거: …"), 서버 로그, preview 응답(reason)에 남긴다.
 """
 from __future__ import annotations
 
@@ -76,7 +84,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, Optional
 
-from .target_resolver import stance as _stance
+from .target_resolver import stance as _stance, ROSTERS as _ROSTERS, name_pattern as _name_pattern
+from .target_resolver import _tokens_of
 
 # ============================================================================
 # CONFIG (override with env vars on the server)
@@ -100,6 +109,7 @@ VICTIM_SWITCH_SAME      = int(os.environ.get("BYSTANDER_VICTIM_SWITCH_SAME", 2))
 VICTIM_SWITCH_WEAKER    = int(os.environ.get("BYSTANDER_VICTIM_SWITCH_WEAKER", 3))     # 더 약한 세기: 연속 판정 수
 PREVIEW_TIMEOUT_SEC     = float(os.environ.get("BYSTANDER_PREVIEW_TIMEOUT_SEC", 1.5))  # v0.3.7: 전송 전 판정 시간 예산
 PREVIEW_CACHE_SEC       = float(os.environ.get("BYSTANDER_PREVIEW_CACHE_SEC", 120))    # v0.3.7: 판정 재사용 시간
+JUDGE_LOG               = os.environ.get("BYSTANDER_JUDGE_LOG", "1") == "1"           # v0.3.8: 판정마다 서버 로그 한 줄
 
 NUDGE_TEXT = {  # suggested copy; the app owns final wording
     "nudge_1": "가만히 있는다면 공격받는 친구가 힘들어 할거야.",
@@ -332,7 +342,9 @@ class BystanderTracker:
 
         # 3) LLM 판정은 잠금 밖에서 (v0.3.3). 그동안 다른 방의 요청과 타이머는 계속 돈다.
         iid, inputs, key = pending
-        label, src = self._classify_shared(key, inputs)       # 전송 전에 미리 판정했으면 그 결과를 쓴다
+        t0 = time.time()
+        label, src, reason = self._classify_shared(key, inputs)   # 전송 전에 미리 판정했으면 그 결과를 쓴다
+        self._log_judgment("record", key, room, iid, new.get("message_id"), inputs, label, src, reason, t0)
         with self._lock:
             inc = self.incidents.get(iid)
             if inc is None:
@@ -340,14 +352,15 @@ class BystanderTracker:
             if not inc.closed and inc.role_of(speaker) == "주변인":      # 그 사이 역할이 바뀌었으면 적용하지 않는다
                 b = self._by(inc, speaker)
                 if b.stage != "unseen":
-                    self._apply_label(inc, b, label, now if fixed_now else time.time(), src)
+                    self._apply_label(inc, b, label, now if fixed_now else time.time(), src, reason)
             return inc.to_dict()
 
     # ------------------------------------------------------------------ public: 전송 전 미리 판정 (v0.3.7)
     def preview(self, req: dict, now: Optional[float] = None, timeout: Optional[float] = None) -> Optional[dict]:
         """전송 전 호출용. 이 메시지가 전송 후 호출에서 어떻게 판정될지 미리 돌려준다. 상태는 바꾸지 않는다.
         사건이 열린 방에서 주변인이 본문 있는 메시지를 보낼 때만 판정하고, 아니면 None.
-        Returns {"label": 방어|동조|방관|비해당, "source": LLM|규칙|규칙(시간 초과)|방어 기능, "incident_id": ...}."""
+        Returns {"label": 방어|동조|방관|비해당, "source": LLM|규칙|규칙(시간 초과)|방어 기능, "incident_id": ...,
+                 "reason": 판정 근거 (v0.3.8)}."""
         room = req["room_id"]
         new = req["new_message"]
         speaker = new["participant_code"]
@@ -361,22 +374,25 @@ class BystanderTracker:
             if inc.role_of(speaker) != "주변인":
                 return None
             if new.get("is_defense_action"):
-                return {"label": "방어", "source": "방어 기능", "incident_id": inc.incident_id}
+                return {"label": "방어", "source": "방어 기능", "incident_id": inc.incident_id, "reason": "방어 기능 메시지"}
             if not text:
                 return None
             inputs = self._classify_inputs(inc, req, speaker)
             key = self._judge_key(inc.incident_id, inputs)
             iid = inc.incident_id
+        t0 = time.time()
         try:
-            label, src = self._classify_shared(key, inputs, timeout=timeout)
+            label, src, reason = self._classify_shared(key, inputs, timeout=timeout)
         except _FutTimeout:                      # LLM은 뒤에서 마저 돌고, 끝나면 전송 후 호출이 그 결과를 쓴다
-            label, src = self._heuristic(inputs[2], inputs[3]), "규칙(시간 초과)"
-        return {"label": label, "source": src, "incident_id": iid}
+            label, src = self._heuristic(inputs[5], inputs[3]), "규칙(시간 초과)"
+            reason = f"LLM이 {timeout:g}초 안에 답하지 않아 키워드 규칙으로 판정"
+        self._log_judgment("preview", key, room, iid, new.get("message_id"), inputs, label, src, reason, t0)
+        return {"label": label, "source": src, "incident_id": iid, "reason": reason}
 
     @staticmethod
     def _judge_key(iid: str, inputs: tuple) -> str:
-        turns, tagged, text, _ = inputs
-        raw = json.dumps([iid, turns, tagged, text.strip()], ensure_ascii=False)
+        turns, tagged, text, _, reply, _raw = inputs
+        raw = json.dumps([iid, turns, tagged, text.strip(), reply], ensure_ascii=False)
         return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
     def _classify_shared(self, key: str, inputs: tuple, timeout: Optional[float] = None) -> tuple:
@@ -384,11 +400,11 @@ class BystanderTracker:
         timeout 안에 끝나지 않으면 concurrent.futures.TimeoutError (판정은 계속 돈다)."""
         now = time.time()
         with self._lock:
-            for k in [k for k, v in self._judged.items() if v[2] <= now]:
+            for k in [k for k, v in self._judged.items() if v[3] <= now]:
                 self._judged.pop(k, None)
             hit = self._judged.get(key)
             if hit:
-                return hit[0], hit[1]
+                return hit[0], hit[1], hit[2]
             fut = self._inflight.get(key)
             if fut is None:
                 fut = self._pool.submit(self._run_classifier, *inputs)
@@ -401,9 +417,9 @@ class BystanderTracker:
             self._inflight.pop(key, None)
             if fut.cancelled() or fut.exception() is not None:
                 return
-            label, src = fut.result()
+            label, src, reason = fut.result()
             if src == "LLM":                     # 규칙 판정은 기억하지 않는다 (다음 호출이 LLM을 다시 시도)
-                self._judged[key] = (label, src, time.time() + PREVIEW_CACHE_SEC)
+                self._judged[key] = (label, src, reason, time.time() + PREVIEW_CACHE_SEC)
 
     # ------------------------------------------------------------------ public: app events
     def on_event(self, ev: dict, now: Optional[float] = None) -> list:
@@ -634,8 +650,16 @@ class BystanderTracker:
         b.nudges += 1
         self._queue(inc.room_id, inc, b, kind, now, payload)
 
-    def _apply_label(self, inc: Incident, b: Bystander, label: Optional[str], now: float, src: str = "391"):
-        """src: 'LLM' | '규칙'(LLM이 꺼져 있거나 답하지 못함) | '391'(/analyze가 준 값)"""
+    def _apply_label(self, inc: Incident, b: Bystander, label: Optional[str], now: float, src: str = "391",
+                     reason: Optional[str] = None):
+        """src: 'LLM' | '규칙'(LLM이 꺼져 있거나 답하지 못함) | '391'(/analyze가 준 값)
+        reason: v0.3.8 판정 근거. 판정 기록 바로 다음 줄에 '판정 근거: …'로 남긴다."""
+        n_before = len(b.history)
+        self._apply_label_core(inc, b, label, now, src)
+        if reason and len(b.history) > n_before:
+            b.log(now, f"판정 근거: {str(reason)[:200]}")
+
+    def _apply_label_core(self, inc: Incident, b: Bystander, label: Optional[str], now: float, src: str):
         if label == "방어":
             self._defend(inc, b, now, f"발화({src})")
         elif label == "동조":
@@ -670,24 +694,79 @@ class BystanderTracker:
         self._queue(inc.room_id, inc, b, "join_feedback", now, {"cancel_window_sec": REACTION_CANCEL_SEC if cancellable else 0})
 
     def _classify_inputs(self, inc: Incident, req: dict, speaker: str) -> tuple:
-        """잠금 안에서: 판정에 필요한 것만 뽑아 둔다 (역할 표시가 붙은 맥락, 본문, 바로 앞 발화자가 가해자인지)."""
-        ctx = req.get("context", [])[-CONTEXT_TURNS:]
+        """잠금 안에서: 판정에 필요한 것만 뽑아 둔다.
+        -> (맥락 turns, 발화자 표시, 대상 발화, 바로 앞 상대가 가해자인지, 답장 대상 (표시, 본문) | None, 원문)
+        v0.3.8: 본문 속 아이 이름은 '코드(역할)'로 바꾸고, 답장이면 답장 대상 메시지와 그 화자의 역할을 함께 넘긴다."""
+        room = req["room_id"]
+        full = req.get("context", [])
+        ctx = full[-CONTEXT_TURNS:]
         tag = lambda c: f"{c}({inc.role_of(c)})"
-        turns = [(tag(m["participant_code"]), m.get("text") or "") for m in ctx]
-        text = req["new_message"].get("text") or ""
-        prev = next((m["participant_code"] for m in reversed(ctx) if m["participant_code"] != speaker), None)
-        return turns, tag(speaker), text, prev in inc.aggressors
+        mask = self._name_masker(room, req, tag)
+        turns = [(tag(m["participant_code"]), mask(m.get("text") or "")) for m in ctx]
+        raw = req["new_message"].get("text") or ""
+        reply, reply_code = None, None
+        rid = req["new_message"].get("reply_to_message_id")
+        if rid:
+            m = next((m for m in reversed(full) if m.get("message_id") == rid), None)
+            reply_code = m["participant_code"] if m else self.msg_speaker.get((room, rid))
+            if reply_code:
+                reply = (tag(reply_code), mask((m or {}).get("text") or "") if m else "(본문은 맥락 밖)")
+        if reply_code is not None:                  # 답장이면 '바로 앞 상대'는 답장 대상의 화자다
+            prev = reply_code if reply_code != speaker else None
+        else:
+            prev = next((m["participant_code"] for m in reversed(ctx) if m["participant_code"] != speaker), None)
+        return turns, tag(speaker), mask(raw), prev in inc.aggressors, reply, raw
 
-    def _run_classifier(self, turns, tagged_speaker, text, prev_is_aggressor) -> tuple:
-        """잠금 밖에서: (label, 출처). LLM이 답하지 못하면(None·예외) 키워드 규칙으로 대신 판정한다."""
+    @staticmethod
+    def _name_masker(room: str, req: dict, tag: Callable) -> Callable:
+        """본문 속 아이 이름 -> '코드(역할)'. 조사는 남긴다 ("유진이 이상함" -> "P03(가해자)이 이상함").
+        명단은 이 요청의 participants·classmates, 없으면 이 방에서 전에 받은 명단."""
+        toks = _ROSTERS.tokens(room)
+        toks.update(_tokens_of(req.get("classmates") or []))
+        toks.update(_tokens_of(req.get("participants") or []))
+        table = []
+        for code, ts in toks.items():
+            pat = _name_pattern(ts)
+            if pat is not None:
+                table.append((code, pat, sorted(ts, key=len, reverse=True)))
+        if not table:
+            return lambda t: t
+
+        def mask(text: str) -> str:
+            if not text:
+                return text
+            for code, pat, ts in table:
+                def sub(m, code=code, ts=ts):
+                    s = m.group(0)
+                    tok = next((t for t in ts if s.startswith(t)), "")
+                    return tag(code) + s[len(tok):]
+                text = pat.sub(sub, text)
+            return text
+        return mask
+
+    def _run_classifier(self, turns, tagged_speaker, text, prev_is_aggressor, reply=None, raw_text=None) -> tuple:
+        """잠금 밖에서: (label, 출처, 근거). LLM이 답하지 못하면(None·예외) 키워드 규칙으로 대신 판정한다.
+        classify는 label 또는 (label, reason)을 돌려준다. 답장이 있으면 reply=(표시, 본문)을 키워드로 넘긴다."""
         if self.classify is not None:
             try:
-                label = self.classify(turns, tagged_speaker, text)
+                out = self.classify(turns, tagged_speaker, text, reply=reply) if reply else \
+                    self.classify(turns, tagged_speaker, text)
+                label, reason = (out if isinstance(out, tuple) else (out, None))
                 if label:
-                    return label, "LLM"
+                    return label, "LLM", reason
             except Exception as e:
                 print("[bystander] classifier error:", e)
-        return self._heuristic(text, prev_is_aggressor), "규칙"
+        return self._heuristic(raw_text if raw_text is not None else text, prev_is_aggressor), "규칙", "키워드 규칙"
+
+    def _log_judgment(self, kind: str, key: str, room: str, iid: str, mid: Optional[str], inputs: tuple,
+                      label: str, src: str, reason: Optional[str], t0: float):
+        """v0.3.8: 판정 한 건 = 서버 로그 한 줄. preview와 record가 같은 key면 같은 판정을 쓴 것이다."""
+        if not JUDGE_LOG:
+            return
+        reply = inputs[4]
+        print(f"[bystander] judge {kind} key={key[:10]} room={room} incident={iid} msg={mid} "
+              f"label={label} src={src} wait_ms={int((time.time() - t0) * 1000)} "
+              f"text={inputs[2]!r} reply_to={reply[0] if reply else None} reason={reason}", flush=True)
 
     @staticmethod
     def _heuristic(text: str, prev_is_aggressor: bool) -> str:

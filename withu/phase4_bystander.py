@@ -22,6 +22,9 @@ Env (provider is picked automatically from whichever key is set; Anthropic wins 
   BYSTANDER_LLM_TIMEOUT   seconds per call (default 6)
   BYSTANDER_LLM_RETRIES   extra attempts after a failure (default 1)
 
+v0.3.8: 답장 대상(reply)을 받는다. LLM은 target(누구를 향한 말인가)·stance(태도)·label을 함께 내고,
+        reconcile()이 4장 표3에 맞지 않는 동조를 고친다 (가해자 비판 -> 방어, 대상 불명 -> 비해당).
+        무관한 이야기는 직전에 화제를 돌렸어도 방관, 짧은 감탄사는 비해당으로 예시를 더했다.
 v0.3.3: 실패하면 빨리 끝낸다. 예전에는 실패할 때마다 1.5·3·4.5초를 쉬어 한 번에 9초가 걸렸고,
         실패 사실이 어디에도 남지 않았다. 이제 마지막 오류를 STATUS에 남기고(/health에서 보임) 로그에 찍는다.
 """
@@ -43,45 +46,108 @@ RETRIES = int(os.environ.get("BYSTANDER_LLM_RETRIES", 1))
 STATUS = {"state": "unknown", "error": None, "ok": 0, "failed": 0, "last_ms": None}
 
 RUBRIC = """너는 초등학생 단체 채팅방에서 '사이버불링이 진행 중인 상황'의 주변인(가해자·피해자가 아닌 참여자) 반응을 분류한다.
-맥락의 발화자 이름 뒤 괄호는 역할이다: (가해자), (피해자), (주변인).
-분류 라벨:
-- 방어: 가해 중단 요구, 피해자 지지·위로·편들기, 항의, 어른에게 알리기, 괴롭힘을 멈추기 위한 화제 전환 (예: "그만해", "괜찮아?", "선생님께 말하자")
-- 동조: 가해 발화에 대한 웃음·호응·동의·강화, 가해 표현 따라하기, 피해자 비난 (예: "ㅋㅋㅋ", "ㅇㅈ", "맞아", "예민하네")
-- 방관: 상황을 보고도 개입 없이 사이버불링과 무관한 이야기로 넘어감
-- 비해당: 주변인 반응으로 보기 어려움 (상황을 묻기만 하는 질문 등)
-핵심 규칙:
-1) 같은 말이라도 '누구의 발화에 반응하는가'에 따라 라벨이 달라진다. 피해자를 향한 조롱에 웃으면 동조, 가해자를 저지하면 방어.
-2) 중단을 요구하면서 가해자에게 긍정적 반응을 함께 보이면("그만해 ㅋㅋ 근데 웃기긴 하다") 방어가 아니라 동조다.
-3) 피해자에게 참으라고 하거나 피해자 탓을 하면 방어가 아니다."""
+발화자와 본문 속 아이는 "코드(역할)"로 적혀 있다: (가해자), (피해자), (주변인). 본문 속 "P03(가해자)이"는 그 아이 이름에 조사가 붙은 것이다.
+[답장 대상]이 있으면 대상 발화는 그 메시지에 단 답장이다. 이때 "너·니가·넌" 같은 2인칭은 답장 대상의 화자를 가리킨다.
 
-# synthetic exemplars (no real data): (context, speaker, target_text, label)
+먼저 두 가지를 정한다.
+- target: 대상 발화가 향하는 사람 = 가해자 | 피해자 | 주변인 | 전체 | 없음
+  (답장 대상 > 본문에 나온 아이 > 바로 앞 발화 순으로 본다. 누구에게 하는 말인지 특정되지 않으면 없음)
+- stance: 그 사람에 대한 태도 = 지지(동의·호응·웃어 주기·편들기) | 비판(탓하기·항의·깎아내리기) | 조롱(비웃기·놀리기) | 중립
+그다음 라벨을 정한다.
+- 방어: 가해 중단 요구, 가해자에 대한 비판·항의·탓하기, 피해자 지지·위로·편들기, 어른에게 알리기,
+        괴롭힘을 멈추자는 뜻이 드러난 화제 전환 (예: "그만해", "괜찮아?", "선생님께 말하자", "이 얘기는 여기까지 하자")
+- 동조: 가해자의 공격에 대한 웃음·호응·동의·강화, 가해 표현 따라하기, 피해자 탓·비난·조롱 (예: "ㅋㅋㅋ", "ㅇㅈ", "맞아", "예민하네")
+- 방관: 사이버불링과 무관한 이야기 (괴롭힘을 멈추자는 말 없이 다른 이야기를 함)
+- 비해당: 주변인 반응으로 보기 어려움 (상황을 묻기만 하는 질문, 누구에게 하는 말인지 모를 짧은 감탄사·추임새 등)
+핵심 규칙:
+1) 같은 말이라도 '누구를 향한 말인가'에 따라 라벨이 달라진다. 피해자를 탓하면 동조, 가해자를 탓하면 방어다.
+   가해자를 향한 비판·탓·깎아내리는 말은 절대 동조가 아니다.
+2) 중단을 요구하면서 가해자에게 긍정적 반응을 함께 보이면("그만해 ㅋㅋ 근데 웃기긴 하다") 동조다.
+3) 피해자에게 참으라고 하거나 피해자 탓을 하면 방어가 아니다.
+4) 동조는 가해자 지지나 피해자 공격이 분명할 때만 고른다. 어떤 메시지에 호응하는지 특정되지 않거나 애매하면 비해당이다.
+5) 대상 발화 하나만 판정한다. 같은 아이가 앞에서 한 말(방어든 동조든)은 맥락일 뿐, 이번 라벨을 정하지 않는다."""
+
+# synthetic exemplars (no real data). 실제 입력처럼 이름은 "코드(역할)"로 바꿔 둔다.
+# (context, reply_to | None, speaker, target_text, target, stance, label)
 SHOTS = [
-    ([("P11(가해자)", "지우 너 진짜 냄새나"), ("지우(피해자)", "왜 그래...")], "P05(주변인)", "그만해 너무 심하잖아", "방어"),
-    ([("P11(가해자)", "쟤랑 아무도 놀지 마 ㅋㅋ")], "P07(주변인)", "지우야 괜찮아? 신경 쓰지 마", "방어"),
-    ([("P11(가해자)", "돼지야 꺼져"), ("P03(주변인)", "ㅋㅋㅋ")], "P05(주변인)", "이 얘기는 여기까지 하자", "방어"),
-    ([("P11(가해자)", "너 같은 애는 나가라")], "P08(주변인)", "이거 선생님한테 말할 거야", "방어"),
-    ([("P11(가해자)", "지우 같은 애랑 누가 놀아")], "P03(주변인)", "ㅋㅋㅋㅋ 인정", "동조"),
-    ([("P11(가해자)", "역겨우니까 나가라")], "P09(주변인)", "ㄹㅇ 나가라", "동조"),
-    ([("P11(가해자)", "냄새나 진짜"), ("지우(피해자)", "그만하라고...")], "P04(주변인)", "예민하네 ㅋㅋ", "동조"),
-    ([("P11(가해자)", "쟤 또 이상한 소리 한다")], "P06(주변인)", "그만해 ㅋㅋ 근데 웃기긴 하다", "동조"),
-    ([("P11(가해자)", "지우 꺼져"), ("지우(피해자)", "ㅠㅠ")], "P02(주변인)", "오늘 숙제 뭐였지?", "방관"),
-    ([("P11(가해자)", "너 진짜 짜증나")], "P10(주변인)", "나 학원 간다~", "방관"),
-    ([("P11(가해자)", "너 진짜 답답하다")], "P12(주변인)", "무슨 일이야?", "비해당"),
+    ([("P11(가해자)", "P02(피해자) 너 진짜 냄새나"), ("P02(피해자)", "왜 그래...")], None,
+     "P05(주변인)", "그만해 너무 심하잖아", "가해자", "비판", "방어"),
+    ([("P11(가해자)", "쟤랑 아무도 놀지 마 ㅋㅋ")], None,
+     "P07(주변인)", "P02(피해자)야 괜찮아? 신경 쓰지 마", "피해자", "지지", "방어"),
+    ([("P11(가해자)", "돼지야 꺼져"), ("P03(주변인)", "ㅋㅋㅋ")], None,
+     "P05(주변인)", "이 얘기는 여기까지 하자", "전체", "비판", "방어"),
+    ([("P11(가해자)", "너 같은 애는 나가라")], None,
+     "P08(주변인)", "이거 선생님한테 말할 거야", "가해자", "비판", "방어"),
+    ([("P11(가해자)", "아 또 오버하네"), ("P02(피해자)", "내가 뭘...")], ("P11(가해자)", "아 또 오버하네"),
+     "P06(주변인)", "너가 먼저 시작했잖아", "가해자", "비판", "방어"),
+    ([("P11(가해자)", "[사진]"), ("P06(주변인)", "사진 내려")], None,
+     "P06(주변인)", "P11(가해자)이 좀 이상한 듯", "가해자", "비판", "방어"),
+    ([("P11(가해자)", "P02(피해자) 같은 애랑 누가 놀아")], None,
+     "P03(주변인)", "ㅋㅋㅋㅋ 인정", "가해자", "지지", "동조"),
+    ([("P11(가해자)", "역겨우니까 나가라")], None,
+     "P09(주변인)", "ㄹㅇ 나가라", "가해자", "지지", "동조"),
+    ([("P11(가해자)", "냄새나 진짜"), ("P02(피해자)", "그만하라고...")], None,
+     "P04(주변인)", "예민하네 ㅋㅋ", "피해자", "조롱", "동조"),
+    ([("P11(가해자)", "P02(피해자) 또 우냐"), ("P02(피해자)", "그만해")], ("P02(피해자)", "그만해"),
+     "P04(주변인)", "니가 먼저 잘못했잖아", "피해자", "비판", "동조"),
+    ([("P11(가해자)", "쟤 또 이상한 소리 한다")], None,
+     "P06(주변인)", "그만해 ㅋㅋ 근데 웃기긴 하다", "가해자", "지지", "동조"),
+    ([("P11(가해자)", "P02(피해자) 꺼져"), ("P02(피해자)", "ㅠㅠ")], None,
+     "P10(주변인)", "오늘 숙제 뭐였지?", "없음", "중립", "방관"),
+    ([("P11(가해자)", "너 진짜 짜증나"), ("P05(주변인)", "그만하고 다른 얘기 하자")], None,
+     "P05(주변인)", "아 배고프다", "없음", "중립", "방관"),
+    ([("P11(가해자)", "너 진짜 답답하다")], None,
+     "P12(주변인)", "무슨 일이야?", "없음", "중립", "비해당"),
+    ([("P11(가해자)", "P02(피해자) 진짜 이상해"), ("P05(주변인)", "속상한 사람 있겠다 그만하자")], None,
+     "P05(주변인)", "헐 무섭다", "없음", "중립", "비해당"),
 ]
+TARGETS = ["가해자", "피해자", "주변인", "전체", "없음"]
+STANCES = ["지지", "비판", "조롱", "중립"]
 
 
 def _render_ctx(ctx) -> str:
     return "\n".join(f"  {s}: {t}" for s, t in ctx) or "  (직전 맥락 없음)"
 
 
-def build_user_prompt(context, speaker, target_text) -> str:
+def _render_item(ctx, reply, speaker, text) -> str:
+    out = f"[맥락]\n{_render_ctx(ctx)}\n"
+    if reply:
+        out += f"[답장 대상] {reply[0]}: {reply[1]}\n"
+    return out + f"[대상 발화] {speaker}: {text}"
+
+
+def _answer(target, stance, label) -> str:
+    return json.dumps({"target": target, "stance": stance, "label": label}, ensure_ascii=False)
+
+
+def build_examples() -> str:
     parts = ["# 예시"]
-    for c, s, t, lab in SHOTS:
-        parts.append(f"[맥락]\n{_render_ctx(c)}\n[대상 발화] {s}: {t}\n[정답] {lab}")
-    parts += ["# 분류할 항목",
-              f"[맥락]\n{_render_ctx(context)}\n[대상 발화] {speaker}: {target_text}",
-              '\nJSON만 출력(설명 금지): {"label":"방어|동조|방관|비해당","reason":"한 문장 근거"}']
+    for c, r, s, t, tg, st, lab in SHOTS:
+        parts.append(_render_item(c, r, s, t) + f"\n[정답] {_answer(tg, st, lab)}")
     return "\n\n".join(parts)
+
+
+OUTPUT_SPEC = ('JSON만 출력(설명 금지): {"target":"가해자|피해자|주변인|전체|없음","stance":"지지|비판|조롱|중립",'
+               '"label":"방어|동조|방관|비해당","reason":"한 문장 근거"}')
+SYSTEM = RUBRIC + "\n\n" + build_examples()       # 고정 부분 (프롬프트 캐시가 걸리도록 한 덩어리로 둔다)
+
+
+def build_user_prompt(context, speaker, target_text, reply=None) -> str:
+    return "# 분류할 항목\n" + _render_item(context, reply, speaker, target_text) + "\n\n" + OUTPUT_SPEC
+
+
+def reconcile(label, target, stance) -> tuple:
+    """v0.3.8: LLM의 (target, stance)와 라벨이 어긋나면 4장 표3에 맞춰 고친다. 동조 쪽만 고친다 (경고가 잘못 뜨는 비용이 크다).
+    Returns (label, 고친 이유 | None)."""
+    if label != "동조":
+        return label, None
+    if target == "가해자" and stance in ("비판", "조롱"):
+        return "방어", "가해자를 향한 비판은 동조가 아님"
+    if target == "피해자" and stance == "지지":
+        return "방어", "피해자 지지는 동조가 아님"
+    if target == "없음" or stance == "중립":
+        return "비해당", "누구에게 호응하는지 특정되지 않음"
+    return label, None
 
 
 _client = None
@@ -91,7 +157,9 @@ def call_llm(system: str, user: str) -> str:
         if _client is None:
             from anthropic import Anthropic    # reads ANTHROPIC_API_KEY
             _client = Anthropic(timeout=TIMEOUT, max_retries=0)
-        msg = _client.messages.create(model=MODEL, max_tokens=300, system=system, temperature=0,
+        # v0.3.8: 루브릭·예시(고정)는 캐시해 응답을 빠르게 한다 (캐시 최소 길이보다 짧으면 그냥 무시됨)
+        msg = _client.messages.create(model=MODEL, max_tokens=300, temperature=0,
+                                      system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
                                       messages=[{"role": "user", "content": user}])
         return "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
     if _client is None:
@@ -104,12 +172,19 @@ def call_llm(system: str, user: str) -> str:
 
 
 def parse_label(txt: str):
+    """-> (label, reason). v0.3.8: target·stance도 읽어 reconcile()로 맞춘다. reason에 target/stance를 붙여 둔다."""
     m = re.search(r"\{.*\}", txt or "", re.DOTALL)
     if m:
         try:
             d = json.loads(m.group(0))
             if d.get("label") in LABELS:
-                return d["label"], d.get("reason", "")
+                tg = d.get("target") if d.get("target") in TARGETS else None
+                st = d.get("stance") if d.get("stance") in STANCES else None
+                label, fixed = reconcile(d["label"], tg, st)
+                why = f"[{tg}/{st}] {d.get('reason', '')}".strip()
+                if fixed:
+                    why += f" (LLM 라벨 {d['label']} → {label}: {fixed})"
+                return label, why
         except Exception:
             pass
     for lab in LABELS:                     # fallback: first label mentioned
@@ -118,17 +193,17 @@ def parse_label(txt: str):
     return "비해당", "(unparseable)"
 
 
-def classify_bystander(context, speaker, target_text, retries: int = None):
-    """context: [(speaker, text), ...] oldest->newest. Returns (label, reason).
+def classify_bystander(context, speaker, target_text, retries: int = None, reply=None):
+    """context: [(speaker, text), ...] oldest->newest. reply: (speaker, text) 답장 대상 | None. Returns (label, reason).
     Never raises: on failure returns ('비해당', '(error: ...)'). 호출한 쪽은 reason이 '(error'로 시작하면
     LLM이 답하지 못한 것으로 보고 키워드 규칙으로 대신 판정한다 (bystander.py)."""
     retries = RETRIES if retries is None else retries
-    user = build_user_prompt(context, speaker, target_text)
+    user = build_user_prompt(context, speaker, target_text, reply)
     last = None
     t0 = time.time()
     for i in range(retries + 1):
         try:
-            out = parse_label(call_llm(RUBRIC, user))
+            out = parse_label(call_llm(SYSTEM, user))
             STATUS.update(state="ok", error=None, ok=STATUS["ok"] + 1, last_ms=int((time.time() - t0) * 1000))
             return out
         except Exception as e:
@@ -220,7 +295,7 @@ def self_check():
 
 if __name__ == "__main__":             # quick live check:  python -m withu.phase4_bystander
     tests = [
-        ([("P11(가해자)", "하늘 너 진짜 냄새나 꺼져")], "P05(주변인)", "ㅋㅋㅋ 맞아"),
+        ([("P11(가해자)", "P02(피해자) 너 진짜 냄새나 꺼져")], "P05(주변인)", "ㅋㅋㅋ 맞아"),
         ([("P11(가해자)", "하늘 너 진짜 냄새나 꺼져"), ("하늘(피해자)", "왜 그래..")], "P06(주변인)", "야 그만해"),
         ([("P11(가해자)", "하늘 너 진짜 냄새나 꺼져")], "P07(주변인)", "너네 내일 소풍 가?"),
     ]

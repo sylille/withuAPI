@@ -62,5 +62,7 @@ class AnalyzeResponse(BaseModel):
     # v0.3.7: 전송 전 호출(track_bystander=false)에서만. 이 메시지를 보내면 받을 판정 (기록되지 않음)
     bystander_preview: Optional[str] = Field(None, description="방어 | 동조 | 방관 | 비해당 | None")
     bystander_preview_source: Optional[str] = Field(None, description="LLM | 규칙 | 규칙(시간 초과) | 방어 기능")
+    # v0.3.8: 판정 근거. LLM이면 "[대상/태도] 한 문장 근거", 규칙이면 규칙으로 판정한 이유 (화면에 보여 주지 말 것)
+    bystander_preview_reason: Optional[str] = None
     participants: List[Participant] = Field(default_factory=list)
 

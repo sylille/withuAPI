@@ -349,6 +349,13 @@ class _Rosters:
         with self._lock:
             return set(self._rooms.get(room_id, {}))
 
+    def tokens(self, room_id) -> dict[str, set]:
+        """v0.3.8: {코드: 이름 조각} — 이 방의 명단 + 학급 명단. 주변인 판정에 보낼 본문에서 이름을 코드로 바꿀 때 쓴다."""
+        with self._lock:
+            out = {c: set(t) for c, t in self._class.get(room_id, {}).items()}
+            out.update({c: set(t) for c, t in self._toks.get(room_id, {}).items()})
+            return out
+
     def get(self, room_id) -> dict[str, "re.Pattern"]:
         """이름을 찾을 대상: 이 방의 명단 + (부분 방이면) 빠진 아이들."""
         with self._lock:
