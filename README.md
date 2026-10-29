@@ -2,7 +2,7 @@
 
 Oct 16, 2026 
 
-Link: https://ranked-ian-flat-gone.trycloudflare.com
+Link: https://north-devel-taxation-deutsche.trycloudflare.com
 
 ## 1. 개요
 
