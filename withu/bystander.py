@@ -69,6 +69,12 @@ v0.3.8 — 누구를 향한 말인지 알려 준다 (2026-10-28 사후검사 보
   * 맥락·답장·대상 발화 속 아이 이름을 "코드(역할)"로 바꿔 보낸다. 예전에는 맥락에 코드만 있고 본문에는 이름이 있어
     "유진이 이상함"의 유진이 가해자인지 LLM이 알 수 없었다. 아이 이름이 LLM으로 나가지 않는 효과도 있다.
   * LLM이 준 근거(reason)를 버리지 않는다: history("판정 근거: …"), 서버 로그, preview 응답(reason)에 남긴다.
+
+v0.3.9 — 전송 전 판정을 빨리 (2026-10-30)
+---------------------------------------
+  * preview_begin()/preview_end(): app이 모델 추론 전에 LLM 판정을 출발시키고, 추론이 끝난 뒤 시간 예산만큼 기다린다.
+    아이가 기다리는 시간의 상한은 그대로이고, LLM은 모델 추론 시간만큼 먼저 출발한다. preview()는 둘을 이어 부른다.
+  * 답장 속 2인칭 비판은 답장 대상을 향한 것으로 고친다 (phase4_bystander.reply_target).
 """
 from __future__ import annotations
 
@@ -260,6 +266,7 @@ class BystanderTracker:
                                         thread_name_prefix="bystander-llm")
         self._judged: dict = {}          # key -> (label, src, expires_at)
         self._inflight: dict = {}        # key -> Future
+        self.last_preview_wait_ms: Optional[int] = None   # v0.3.9: 전송 전 호출이 LLM을 기다린 시간 (/health)
 
     def set_classifier(self, fn: Optional[Callable]):
         self.classify = fn
@@ -361,12 +368,16 @@ class BystanderTracker:
         사건이 열린 방에서 주변인이 본문 있는 메시지를 보낼 때만 판정하고, 아니면 None.
         Returns {"label": 방어|동조|방관|비해당, "source": LLM|규칙|규칙(시간 초과)|방어 기능, "incident_id": ...,
                  "reason": 판정 근거 (v0.3.8)}."""
+        return self.preview_end(self.preview_begin(req, now), timeout)
+
+    def preview_begin(self, req: dict, now: Optional[float] = None) -> Optional[dict]:
+        """v0.3.9: 판정할 메시지면 LLM 판정을 바로 시작해 두고 손잡이를 돌려준다 (기다리지 않는다).
+        app은 이것을 모델 추론보다 먼저 불러, 모델이 도는 동안 LLM도 함께 돌게 한다. 판정 대상이 아니면 None."""
         room = req["room_id"]
         new = req["new_message"]
         speaker = new["participant_code"]
         text = (new.get("text") or "").strip()
         now = now if now is not None else time.time()
-        timeout = PREVIEW_TIMEOUT_SEC if timeout is None else timeout
         with self._lock:
             inc = self._active(room)
             if inc is None or now - inc.last_anchor_ts >= INCIDENT_IDLE_CLOSE_SEC:   # 곧 닫힐 사건은 보지 않는다
@@ -374,20 +385,41 @@ class BystanderTracker:
             if inc.role_of(speaker) != "주변인":
                 return None
             if new.get("is_defense_action"):
-                return {"label": "방어", "source": "방어 기능", "incident_id": inc.incident_id, "reason": "방어 기능 메시지"}
+                return {"done": {"label": "방어", "source": "방어 기능", "incident_id": inc.incident_id,
+                                 "reason": "방어 기능 메시지"}}
             if not text:
                 return None
             inputs = self._classify_inputs(inc, req, speaker)
             key = self._judge_key(inc.incident_id, inputs)
             iid = inc.incident_id
         t0 = time.time()
+        return {"key": key, "inputs": inputs, "iid": iid, "room": room, "mid": new.get("message_id"),
+                "t0": t0, "job": self._classify_start(key, inputs)}
+
+    def preview_end(self, h: Optional[dict], timeout: Optional[float] = None) -> Optional[dict]:
+        """v0.3.9: preview_begin의 판정을 timeout초까지 기다린다. 시간 예산은 여기서부터 센다.
+        (그래서 아이가 기다리는 시간의 상한은 예전과 같고, LLM은 모델 추론 시간만큼 먼저 출발한다.)"""
+        if h is None:
+            return None
+        if "done" in h:
+            return h["done"]
+        timeout = PREVIEW_TIMEOUT_SEC if timeout is None else timeout
+        w0 = time.time()
+        job, inputs = h["job"], h["inputs"]
         try:
-            label, src, reason = self._classify_shared(key, inputs, timeout=timeout)
+            label, src, reason = job if isinstance(job, tuple) else job.result(timeout=timeout)
         except _FutTimeout:                      # LLM은 뒤에서 마저 돌고, 끝나면 전송 후 호출이 그 결과를 쓴다
             label, src = self._heuristic(inputs[5], inputs[3]), "규칙(시간 초과)"
-            reason = f"LLM이 {timeout:g}초 안에 답하지 않아 키워드 규칙으로 판정"
-        self._log_judgment("preview", key, room, iid, new.get("message_id"), inputs, label, src, reason, t0)
-        return {"label": label, "source": src, "incident_id": iid, "reason": reason}
+            reason = (f"LLM이 {timeout:g}초 안에 답하지 않아 키워드 규칙으로 판정 "
+                      f"(LLM 출발 후 {int((time.time() - h['t0']) * 1000)}ms)")
+        self.last_preview_wait_ms = int((time.time() - w0) * 1000)
+        self._log_judgment("preview", h["key"], h["room"], h["iid"], h["mid"], inputs, label, src, reason, h["t0"])
+        return {"label": label, "source": src, "incident_id": h["iid"], "reason": reason}
+
+    def has_open_incident(self, room: str) -> bool:
+        """v0.3.9: 이 방에 열린 사건이 있는가 (LLM 미리 깨우기 판단용)."""
+        with self._lock:
+            return self._active(room) is not None
 
     @staticmethod
     def _judge_key(iid: str, inputs: tuple) -> str:
@@ -398,6 +430,11 @@ class BystanderTracker:
     def _classify_shared(self, key: str, inputs: tuple, timeout: Optional[float] = None) -> tuple:
         """같은 판정은 한 번만 돌린다. 끝난 LLM 판정은 PREVIEW_CACHE_SEC 동안 재사용, 도는 중이면 그것을 기다린다.
         timeout 안에 끝나지 않으면 concurrent.futures.TimeoutError (판정은 계속 돈다)."""
+        job = self._classify_start(key, inputs)
+        return job if isinstance(job, tuple) else job.result(timeout=timeout)
+
+    def _classify_start(self, key: str, inputs: tuple):
+        """-> 이미 끝난 판정 (label, src, reason) 또는 도는 중인 Future. 없으면 새로 시작한다."""
         now = time.time()
         with self._lock:
             for k in [k for k, v in self._judged.items() if v[3] <= now]:
@@ -410,7 +447,7 @@ class BystanderTracker:
                 fut = self._pool.submit(self._run_classifier, *inputs)
                 self._inflight[key] = fut
                 fut.add_done_callback(lambda f, k=key: self._remember_judgment(k, f))
-        return fut.result(timeout=timeout)
+        return fut
 
     def _remember_judgment(self, key: str, fut):
         with self._lock:
