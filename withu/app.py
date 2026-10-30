@@ -24,7 +24,7 @@ from .bystander_api import router as bystander_router, tracker
 from .target_resolver import set_request_context, set_exclusion_judge
 from . import models
 
-app = FastAPI(title="WithU Talk AI 추론 서버", version="0.3.8")
+app = FastAPI(title="WithU Talk AI 추론 서버", version="0.3.9")
 _llm = None            # phase4_bystander 모듈 (ENABLE_BYSTANDER=1일 때)
 app.include_router(bystander_router)
 _ensemble: Ensemble | None = None
@@ -97,6 +97,21 @@ def _startup():
         threading.Thread(target=_llm.self_check, name="llm-self-check", daemon=True).start()
 
 
+def _maybe_warm(room_id: str):
+    """v0.3.9: 사건이 열린 방에 움직임이 있으면(메시지, 방 열기·읽음) LLM 연결과 프롬프트 캐시를 미리 깨운다.
+    마지막 LLM 호출이 BYSTANDER_LLM_WARM_SEC(기본 45초)보다 오래됐을 때만, 뒤에서 1토큰짜리 호출 한 번."""
+    if _llm is None:
+        return
+    try:
+        if tracker.has_open_incident(room_id):
+            _llm.warm_async()
+    except Exception as e:
+        print("[bystander] warm error:", e)
+
+
+tracker.warm_hook = _maybe_warm
+
+
 @app.get("/health")
 def health():
     out = {"status": "ok", "version": app.version, "ensemble_ready": _ensemble is not None,
@@ -108,6 +123,9 @@ def health():
         out["bystander_llm"] = _llm.STATUS["state"]
         if _llm.STATUS.get("last_ms") is not None:    # v0.3.7: 마지막 LLM 판정에 걸린 시간 (전송 전 미리 판정의 대기 시간)
             out["bystander_llm_last_ms"] = _llm.STATUS["last_ms"]
+        if tracker.last_preview_wait_ms is not None:  # v0.3.9: 전송 전 호출이 모델 추론 뒤 LLM을 더 기다린 시간
+            out["bystander_preview_last_wait_ms"] = tracker.last_preview_wait_ms
+        out["bystander_llm_warm_calls"] = _llm.STATUS.get("warm", 0)
         if _llm.STATUS["error"]:
             out["bystander_llm_error"] = _llm.STATUS["error"]
     return out
@@ -117,6 +135,15 @@ def health():
 def analyze(req: AnalyzeRequest):
     set_request_context(req)
     body = req.model_dump()
+    # v0.3.9: 전송 전 호출이면 LLM 판정을 모델 추론보다 먼저 출발시킨다 (모델이 도는 동안 LLM도 함께 돈다)
+    pv = None
+    if not req.track_bystander:
+        try:
+            pv = tracker.preview_begin(body)
+        except Exception as e:                   # never break /analyze because of the tracker
+            print("[bystander] preview error:", e)
+    if pv is None:                               # 판정을 막 시작했으면 그 호출이 곧 연결을 깨운다
+        _maybe_warm(req.room_id)
     result = _ensemble.analyze(body)
     if req.track_bystander:
         try:
@@ -134,7 +161,7 @@ def analyze(req: AnalyzeRequest):
     else:
         # v0.3.7: 전송 전 호출. 사건이 열린 방의 주변인이면 이 메시지가 어떻게 판정될지 미리 알려 준다 (기록하지 않음)
         try:
-            p = tracker.preview(body)
+            p = tracker.preview_end(pv)
         except Exception as e:                   # never break /analyze because of the tracker
             print("[bystander] preview error:", e)
             p = None

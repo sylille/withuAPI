@@ -27,6 +27,9 @@ v0.3.8: 답장 대상(reply)을 받는다. LLM은 target(누구를 향한 말인
         연구진 기준(10-29): 가해자에 대한 공개적 반대·핀잔("○○ 이상해", "○○ 뭐라는 거야")은 방어,
         가해자에게 욕설을 쓰면 방어가 아니라 비해당.
         무관한 이야기는 직전에 화제를 돌렸어도 방관, 짧은 감탄사는 비해당으로 예시를 더했다.
+v0.3.9: 답장이면 대상 발화 줄에 "→ P01(가해자)에게 답장"을 붙인다. LLM이 답장 대상을 무시하고 2인칭 비판의 target을
+        다른 아이로 잡으면 서버가 답장 대상으로 고친다 (사후검사4 '니가 잘못한거잖아' → 가해자 답장인데 [피해자/비판]).
+        응답을 빠르게: 근거는 15자 이내, 출력 토큰 상한, HTTP 연결 유지(keep-alive), warm()으로 연결·프롬프트 캐시 미리 깨우기.
 v0.3.3: 실패하면 빨리 끝낸다. 예전에는 실패할 때마다 1.5·3·4.5초를 쉬어 한 번에 9초가 걸렸고,
         실패 사실이 어디에도 남지 않았다. 이제 마지막 오류를 STATUS에 남기고(/health에서 보임) 로그에 찍는다.
 """
@@ -43,9 +46,13 @@ MODEL = os.environ.get("BYSTANDER_LLM_MODEL") or os.environ.get("OPENAI_MODEL") 
     else os.environ.get("BYSTANDER_LLM_MODEL")
 MODEL = MODEL or ("claude-sonnet-4-6" if PROVIDER == "anthropic" else "gpt-4o-mini")
 TIMEOUT = float(os.environ.get("BYSTANDER_LLM_TIMEOUT", 6))
+MAX_TOKENS = int(os.environ.get("BYSTANDER_LLM_MAX_TOKENS", 120))          # v0.3.9: 출력이 길수록 느리다
+KEEPALIVE_SEC = float(os.environ.get("BYSTANDER_LLM_KEEPALIVE_SEC", 120))  # v0.3.9: 쉬는 연결을 이만큼 붙잡아 둔다 (SDK 기본 5초)
+WARM_SEC = float(os.environ.get("BYSTANDER_LLM_WARM_SEC", 45))             # v0.3.9: 마지막 호출이 이보다 오래면 warm()이 깨운다. 0이면 끔
 RETRIES = int(os.environ.get("BYSTANDER_LLM_RETRIES", 1))
 # 마지막 호출 결과. app.py의 /health가 그대로 보여 준다.
-STATUS = {"state": "unknown", "error": None, "ok": 0, "failed": 0, "last_ms": None}
+STATUS = {"state": "unknown", "error": None, "ok": 0, "failed": 0, "last_ms": None, "warm": 0}
+_last_call = 0.0                          # v0.3.9: 마지막으로 API에 요청을 보낸 시각 (warm 판단용)
 
 RUBRIC = """너는 초등학생 단체 채팅방에서 '사이버불링이 진행 중인 상황'의 주변인(가해자·피해자가 아닌 참여자) 반응을 분류한다.
 발화자와 본문 속 아이는 "코드(역할)"로 적혀 있다: (가해자), (피해자), (주변인). 본문 속 "P03(가해자)이"는 그 아이 이름에 조사가 붙은 것이다.
@@ -123,8 +130,9 @@ def _render_ctx(ctx) -> str:
 
 def _render_item(ctx, reply, speaker, text) -> str:
     out = f"[맥락]\n{_render_ctx(ctx)}\n"
-    if reply:
+    if reply:                              # v0.3.9: 누구에게 단 답장인지 대상 발화 줄에도 적는다
         out += f"[답장 대상] {reply[0]}: {reply[1]}\n"
+        return out + f"[대상 발화] {speaker} → {reply[0]}에게 답장: {text}"
     return out + f"[대상 발화] {speaker}: {text}"
 
 
@@ -139,8 +147,8 @@ def build_examples() -> str:
     return "\n\n".join(parts)
 
 
-OUTPUT_SPEC = ('JSON만 출력(설명 금지): {"target":"가해자|피해자|주변인|전체|없음","stance":"지지|비판|조롱|중립",'
-               '"label":"방어|동조|방관|비해당","reason":"한 문장 근거"}')
+OUTPUT_SPEC = ('JSON만 출력(설명 금지): {"target":"가해자|피해자|주변인|전체|없음","stance":"지지|비판|조롱|욕설|중립",'
+               '"label":"방어|동조|방관|비해당","reason":"15자 이내 근거"}')
 SYSTEM = RUBRIC + "\n\n" + build_examples()       # 고정 부분 (프롬프트 캐시가 걸리도록 한 덩어리로 둔다)
 
 
@@ -154,6 +162,27 @@ def has_profanity(text: str) -> bool:
         if not _QUOTED.match(text, m.end()):
             return True
     return False
+
+
+_ROLE_TAG = re.compile(r"\((가해자|피해자|주변인)\)")
+_SECOND_PERSON = re.compile(r"(?:^|[^가-힣])(?:너(?!무|머)|니(?!까)|넌|네가|너희)")   # "너무", "네(대답)"는 빼고
+
+
+def reply_target(reply, text: str, target, stance) -> tuple:
+    """v0.3.9: 답장인데 LLM이 2인칭 비판의 target을 답장 대상이 아닌 아이로 잡았으면 답장 대상으로 고친다.
+    루브릭대로 답장 속 "너·니가"는 답장 대상의 화자다. 고치는 경우를 좁게 둔다:
+      stance가 비판, 본문에 2인칭이 있고, 본문에 다른 아이(코드(역할))가 나오지 않을 때만.
+    ("ㅋㅋ"·"인정"처럼 웃음·호응은 target을 바꾸면 뜻이 뒤집히므로 건드리지 않는다.)
+    Returns (target, 고친 이유 | None)."""
+    if not reply or stance != "비판" or not _SECOND_PERSON.search(text or ""):
+        return target, None
+    m = _ROLE_TAG.search(reply[0] or "")
+    if not m:
+        return target, None
+    want = m.group(1)
+    if target == want or _ROLE_TAG.search(text or ""):
+        return target, None
+    return want, f"답장 대상이 {want}: 2인칭은 답장 대상 (target {target}→{want})"
 
 
 def reconcile(label, target, stance, text: str = "") -> tuple:
@@ -178,28 +207,61 @@ def reconcile(label, target, stance, text: str = "") -> tuple:
 
 
 _client = None
-def call_llm(system: str, user: str) -> str:
-    global _client
+def _http_client(mod):
+    """v0.3.9: 쉬는 연결을 KEEPALIVE_SEC 동안 붙잡아 둔다. SDK 기본은 5초라, 5초만 쉬어도 다음 호출이 연결(TLS)을 새로 맺었다."""
+    try:
+        try:
+            import httpx2 as httpx             # 최신 SDK는 httpx2를 쓴다
+        except ImportError:
+            import httpx
+        return mod.DefaultHttpxClient(timeout=TIMEOUT, limits=httpx.Limits(
+            max_connections=100, max_keepalive_connections=20, keepalive_expiry=KEEPALIVE_SEC))
+    except Exception as e:                 # 오래된 SDK면 기본 클라이언트
+        print("[bystander] keep-alive 설정 실패, 기본 연결 사용:", e, flush=True)
+        return None
+
+
+_temp_ok = None
+def _takes_temperature(client) -> bool:
+    global _temp_ok
+    if _temp_ok is None:
+        import inspect
+        try:
+            _temp_ok = "temperature" in inspect.signature(client.messages.create).parameters
+        except (TypeError, ValueError):
+            _temp_ok = True
+    return _temp_ok
+
+
+def call_llm(system: str, user: str, max_tokens: int = None) -> str:
+    global _client, _last_call
+    max_tokens = max_tokens or MAX_TOKENS
+    _last_call = time.time()
     if PROVIDER == "anthropic":
         if _client is None:
-            from anthropic import Anthropic    # reads ANTHROPIC_API_KEY
-            _client = Anthropic(timeout=TIMEOUT, max_retries=0)
+            import anthropic                   # reads ANTHROPIC_API_KEY
+            hc = _http_client(anthropic)
+            _client = anthropic.Anthropic(timeout=TIMEOUT, max_retries=0, **({"http_client": hc} if hc else {}))
         # v0.3.8: 루브릭·예시(고정)는 캐시해 응답을 빠르게 한다 (캐시 최소 길이보다 짧으면 그냥 무시됨)
-        msg = _client.messages.create(model=MODEL, max_tokens=300, temperature=0,
+        extra = {"temperature": 0} if _takes_temperature(_client) else {}   # 최신 SDK(2.x)는 temperature를 받지 않는다
+        msg = _client.messages.create(model=MODEL, max_tokens=max_tokens, **extra,
                                       system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
                                       messages=[{"role": "user", "content": user}])
         return "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
     if _client is None:
-        from openai import OpenAI              # reads OPENAI_API_KEY
-        _client = OpenAI(timeout=TIMEOUT, max_retries=0)
+        import openai                          # reads OPENAI_API_KEY
+        hc = _http_client(openai)
+        _client = openai.OpenAI(timeout=TIMEOUT, max_retries=0, **({"http_client": hc} if hc else {}))
     r = _client.chat.completions.create(
         model=MODEL, temperature=0,          # v0.3.4: 같은 입력에 같은 답이 나오도록
+        max_completion_tokens=max_tokens,
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}])
     return r.choices[0].message.content or ""
 
 
-def parse_label(txt: str, text: str = ""):
-    """-> (label, reason). v0.3.8: target·stance도 읽어 reconcile()로 맞춘다. reason에 target/stance를 붙여 둔다."""
+def parse_label(txt: str, text: str = "", reply=None):
+    """-> (label, reason). v0.3.8: target·stance도 읽어 reconcile()로 맞춘다. reason에 target/stance를 붙여 둔다.
+    v0.3.9: 답장이면 reply_target()으로 target을 먼저 맞춘다."""
     m = re.search(r"\{.*\}", txt or "", re.DOTALL)
     if m:
         try:
@@ -207,10 +269,15 @@ def parse_label(txt: str, text: str = ""):
             if d.get("label") in LABELS:
                 tg = d.get("target") if d.get("target") in TARGETS else None
                 st = d.get("stance") if d.get("stance") in STANCES else None
+                tg, tfix = reply_target(reply, text, tg, st)
                 label, fixed = reconcile(d["label"], tg, st, text)
+                if tfix:                           # target만 바뀌고 라벨은 그대로여도 근거에 남긴다
+                    fixed = tfix + (f"; {fixed}" if fixed else "")
                 why = f"[{tg}/{st}] {d.get('reason', '')}".strip()
-                if fixed:
+                if fixed and label != d["label"]:
                     why += f" (LLM 라벨 {d['label']} → {label}: {fixed})"
+                elif fixed:
+                    why += f" ({fixed})"
                 return label, why
         except Exception:
             pass
@@ -230,7 +297,7 @@ def classify_bystander(context, speaker, target_text, retries: int = None, reply
     t0 = time.time()
     for i in range(retries + 1):
         try:
-            out = parse_label(call_llm(SYSTEM, user), target_text)
+            out = parse_label(call_llm(SYSTEM, user), target_text, reply)
             STATUS.update(state="ok", error=None, ok=STATUS["ok"] + 1, last_ms=int((time.time() - t0) * 1000))
             return out
         except Exception as e:
@@ -310,6 +377,31 @@ def judge_exclusion(context, speaker, target_text, retries: int = None):
         print(f"[exclusion] !! LLM 호출 실패 ({PROVIDER}/{MODEL}): {err}", flush=True)
     STATUS.update(state="error", error=err, failed=STATUS["failed"] + 1)
     return None
+
+
+_warming = False
+def warm(force: bool = False) -> bool:
+    """v0.3.9: 판정 직전에 연결과 프롬프트 캐시를 깨워 둔다 (출력 1토큰짜리 호출).
+    마지막 호출이 WARM_SEC보다 오래됐을 때만 부른다. 동시에 하나만. 결과는 버린다. Returns 실제로 불렀는지."""
+    global _warming
+    if (WARM_SEC <= 0 and not force) or _warming or (not force and time.time() - _last_call < WARM_SEC):
+        return False
+    _warming = True
+    try:
+        call_llm(SYSTEM, build_user_prompt([("P11(가해자)", "너 진짜 왜 그래")], "P05(주변인)", "흠"), max_tokens=1)
+        STATUS["warm"] = STATUS.get("warm", 0) + 1
+        return True
+    except Exception as e:                 # 깨우기 실패는 판정에 영향 없음
+        print("[bystander] warm 실패:", type(e).__name__, str(e)[:120], flush=True)
+        return False
+    finally:
+        _warming = False
+
+
+def warm_async():
+    if WARM_SEC > 0 and not _warming and time.time() - _last_call >= WARM_SEC:
+        import threading
+        threading.Thread(target=warm, name="llm-warm", daemon=True).start()
 
 
 def self_check():

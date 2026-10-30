@@ -35,6 +35,9 @@ class BystanderEvent(BaseModel):
 @router.post("/events")
 def post_event(ev: BystanderEvent):
     actions = tracker.on_event(ev.model_dump())
+    hook = getattr(tracker, "warm_hook", None)       # v0.3.9: 아이가 사건 방을 열면 LLM을 미리 깨운다
+    if hook and ev.type in ("room_open", "read", "join"):
+        hook(ev.room_id)
     return {"ok": True, "actions": actions}
 
 
