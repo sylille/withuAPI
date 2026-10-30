@@ -1,6 +1,5 @@
 # 위드유톡 AI 추론 서버 API 문서 v0.3.9
 
-Oct 16, 2026 
 
 Link: https://north-devel-taxation-deutsche.trycloudflare.com
 
