@@ -1,7 +1,7 @@
 # 위드유톡 AI 추론 서버 API 문서 v0.3.9
 
 
-Link: https://north-devel-taxation-deutsche.trycloudflare.com
+Link: https://resulting-inspiration-john-ease.trycloudflare.com    
 
 ## 1. 개요
 
