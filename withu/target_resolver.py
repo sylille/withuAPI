@@ -1097,15 +1097,24 @@ def evaluate_window_v2(window: list[dict], module_b_window=None, *, room_id=None
     kinds = ROSTERS.absent_kind(room_id) if room_id is not None else {}
     spoke = {it["speaker"] for it in hist}
     absent = {c for c in kinds if c not in spoke}       # 이 방에서 말한 아이는 명단에 없어도 방에 있는 아이다
-    if base["is_bullying"]:
+    meta_by_mid = {it["mid"]: it for it in hist if it.get("mid")}
+    r = None
+    # v0.3.10: 창 판정이 '가까이서 말한 아이'(turn_adjacency)로만 피해자를 정했으면 바로 돌려주지 않고 아래 판정을 먼저 본다.
+    # 창 판정은 이름을 참가자 코드로만 찾아서 표시 이름("이영희")을 못 본다. 공격이 창 안에 6개 이상 쌓이면 창 판정이
+    # 먼저 열려, 공격 바로 뒤에 말린 아이("박민수 그만해")가 피해자로 잡히고 이름 지목은 쓰이지 않았다.
+    if base["is_bullying"] and base["attr"].victim_reason == "turn_adjacency":
+        r = resolve_target(hist, roster, meta_by_mid, absent)
+        if not (r and r["is_bullying"]):
+            r = None                                    # 아래 판정이 열리지 않으면 예전처럼 창 판정을 쓴다
+    if base["is_bullying"] and r is None:
         aggr = base["attr"].aggressors
         nprot = protest_counts(hist, aggr)
         return {**base, "target_source": "window", "attack_mids": _attack_mids(guarded, aggr),
                 "victim_support": _support(base["attr"].victim_reason, base["attr"].victim, nprot),
                 "victim_protests": nprot[base["attr"].victim]}
 
-    meta_by_mid = {it["mid"]: it for it in hist if it.get("mid")}
-    r = resolve_target(hist, roster, meta_by_mid, absent)
+    if r is None:
+        r = resolve_target(hist, roster, meta_by_mid, absent)
     if r and r["is_bullying"]:
         notes = {it["note"] for it in hist if it.get("note") in
                  ("exclusion_talk", "image_then_protest", "dismissal_after_protest")
