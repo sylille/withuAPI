@@ -11,11 +11,13 @@ cyberbullying judgment. v0.3.0 adds the 방관행동 판정부:
     POST /bystander/events           -> read / leave / reaction / defense events from the app
     GET  /bystander/actions          -> 30 s / 60 s nudges, summary, badge, choices to show
 """
+import hmac
 import os
 import time
 from functools import lru_cache
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from .schemas import AnalyzeRequest, AnalyzeResponse
 from .ensemble import Ensemble
@@ -28,6 +30,21 @@ app = FastAPI(title="WithU Talk AI 추론 서버", version="0.3.10")
 _llm = None            # phase4_bystander 모듈 (ENABLE_BYSTANDER=1일 때)
 app.include_router(bystander_router)
 _ensemble: Ensemble | None = None
+
+# API 키: 환경변수 WITHU_API_KEY가 있으면 모든 요청에 같은 값의 X-API-Key 헤더가 있어야 한다 (없으면 401).
+# 비워 두면 예전처럼 키 없이 받는다. 키는 ~/.withu_secrets에 두고 저장소에는 올리지 않는다.
+# /health와 문서(/docs, /redoc, /openapi.json)는 키 없이 열린다.
+API_KEY = os.environ.get("WITHU_API_KEY", "").strip()
+_OPEN_PATHS = {"/health", "/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"}
+
+
+@app.middleware("http")
+async def _require_api_key(request: Request, call_next):
+    if API_KEY and request.url.path not in _OPEN_PATHS and request.method != "OPTIONS":
+        got = request.headers.get("x-api-key", "")
+        if not hmac.compare_digest(got.encode(), API_KEY.encode()):
+            return JSONResponse(status_code=401, content={"detail": "invalid or missing X-API-Key"})
+    return await call_next(request)
 
 
 def _load_classify_bystander():
@@ -90,6 +107,7 @@ def _ts_or(v, default):
 @app.on_event("startup")
 def _startup():
     global _ensemble
+    print(f"[auth] X-API-Key {'required' if API_KEY else 'NOT required (WITHU_API_KEY unset)'}")
     _ensemble = build_ensemble()
     tracker.start_background(interval=1.0)     # fires the 30 s / 60 s timers
     if _llm is not None:                       # LLM이 실제로 답하는지 한 번 확인 (시작을 막지 않게 따로 돌린다)
@@ -115,6 +133,7 @@ tracker.warm_hook = _maybe_warm
 @app.get("/health")
 def health():
     out = {"status": "ok", "version": app.version, "ensemble_ready": _ensemble is not None,
+           "api_key_required": bool(API_KEY),
            "bystander_tracker": tracker._thread is not None and tracker._thread.is_alive()}
     # v0.3.3: 모듈 D(LLM) 상태. "ok" | "error"(bystander_llm_error에 이유) | "unknown"(아직 호출 전) | "off"
     if _llm is None:

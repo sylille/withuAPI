@@ -28,17 +28,24 @@ Link: https://resulting-inspiration-john-ease.trycloudflare.com
 
 실선은 요청, 점선은 응답입니다. ②는 메시지마다 한 번만 부릅니다. 두 번 부르면 사건과 주변인 판정이 두 번 계산됩니다. 서버에 `WITHU_ACTION_WEBHOOK`을 설정하면 ④ 대신 서버가 알림을 앱으로 POST합니다.
 
+**API 키.** 서버에 키가 설정되어 있으면 모든 요청에 `X-API-Key` 헤더가 있어야 합니다. 없거나 틀리면 `401`과 `{"detail": "invalid or missing X-API-Key"}`가 돌아옵니다. `/health`와 `/docs`는 키 없이 열립니다. 키가 필요한지는 `/health`의 `api_key_required`로 확인합니다. 키 값은 연구팀이 따로 전달합니다.
+
+```bash
+curl -X POST http://<서버>:8000/analyze -H "Content-Type: application/json" -H "X-API-Key: <키>" -d '{...}'
+```
+
 ## 3. `GET /health` — 서버 상태 확인
 
-`ensemble_ready`와 `bystander_tracker`가 모두 `true`이고 `bystander_llm`이 `ok`여야 정상입니다. `bystander_tracker`가 `false`이면 30초·60초 알림이 나가지 않습니다.
+키 없이 부를 수 있습니다. `ensemble_ready`와 `bystander_tracker`가 모두 `true`이고 `bystander_llm`이 `ok`여야 정상입니다. `bystander_tracker`가 `false`이면 30초·60초 알림이 나가지 않습니다.
 
 ```json
-{ "status": "ok", "version": "0.3.9", "ensemble_ready": true, "bystander_tracker": true, "bystander_llm": "ok", "bystander_llm_last_ms": 820, "bystander_preview_last_wait_ms": 310, "bystander_llm_warm_calls": 3 }
+{ "status": "ok", "version": "0.3.10", "ensemble_ready": true, "api_key_required": true, "bystander_tracker": true, "bystander_llm": "ok", "bystander_llm_last_ms": 820, "bystander_preview_last_wait_ms": 310, "bystander_llm_warm_calls": 3 }
 ```
 
 | 필드 | 설명 |
 | --- | --- |
 | `ensemble_ready` | 판정 모델(모듈 A·B·D)이 모두 로드됨 |
+| `api_key_required` | 다른 호출에 `X-API-Key` 헤더가 필요함 |
 | `bystander_tracker` | 방관행동 타이머 스레드가 실행 중 |
 | `bystander_llm` | 주변인 발화 판정 LLM(모듈 D)의 상태 (0.3.3). `ok`, `error`(이유는 `bystander_llm_error`), `unknown`(아직 호출 전), `off`. `error`여도 서버는 키워드 규칙으로 판정을 계속합니다 |
 | `bystander_llm_last_ms` | 마지막 LLM 판정에 걸린 시간(밀리초) (0.3.7). LLM 호출 자체의 시간입니다. LLM을 아직 부르지 않았으면 없음 |
@@ -507,10 +514,12 @@ LLM은 누구를 향한 말인지(대상)와 태도를 먼저 정하고 라벨�
 
 ```bash
 source ~/python313_env/bin/activate
-source ~/.withu_secrets          # OPENAI_API_KEY 등. 이 파일은 저장소에 올리지 않습니다
+source ~/.withu_secrets          # OPENAI_API_KEY, WITHU_API_KEY 등. 이 파일은 저장소에 올리지 않습니다
 cd ~/Downloads
 ENABLE_BYSTANDER=1 uvicorn withu.app:app --host 0.0.0.0 --port 8000 --workers 1
 ```
+
+`WITHU_API_KEY`가 설정되어 있으면 서버가 키를 확인합니다 (시작할 때 `[auth] X-API-Key required`가 찍힘). 비워 두면 키 없이 받습니다. 키는 `~/.withu_secrets`에 `export WITHU_API_KEY=...`로 넣고, 테스트 스크립트에는 `--key $WITHU_API_KEY`로 넘깁니다.
 
 **터미널 2 — 로컬 확인 후 터널 열기**
 
