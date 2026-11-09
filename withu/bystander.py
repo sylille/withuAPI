@@ -262,7 +262,7 @@ class BystanderTracker:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         # v0.3.7: 발화 판정 공유 (전송 전 미리 판정 -> 전송 후 기록)
-        self._pool = ThreadPoolExecutor(max_workers=int(os.environ.get("BYSTANDER_LLM_WORKERS", 8)),
+        self._pool = ThreadPoolExecutor(max_workers=int(os.environ.get("BYSTANDER_LLM_WORKERS", 32)),   # v0.3.11: 8 -> 32
                                         thread_name_prefix="bystander-llm")
         self._judged: dict = {}          # key -> (label, src, expires_at)
         self._inflight: dict = {}        # key -> Future
