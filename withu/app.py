@@ -13,7 +13,9 @@ cyberbullying judgment. v0.3.0 adds the 방관행동 판정부:
 """
 import hmac
 import os
+import threading
 import time
+from collections import deque
 from functools import lru_cache
 
 from fastapi import FastAPI, Request
@@ -26,7 +28,7 @@ from .bystander_api import router as bystander_router, tracker
 from .target_resolver import set_request_context, set_exclusion_judge
 from . import models
 
-app = FastAPI(title="WithU Talk AI 추론 서버", version="0.3.10")
+app = FastAPI(title="WithU Talk AI 추론 서버", version="0.3.11")
 _llm = None            # phase4_bystander 모듈 (ENABLE_BYSTANDER=1일 때)
 app.include_router(bystander_router)
 _ensemble: Ensemble | None = None
@@ -99,6 +101,18 @@ def _window_scores(req: dict) -> list:
     return out
 
 
+# v0.3.11: /analyze 응답 시간 기록 (/health에 최근 200건의 중앙값·95%·최대, 동시에 처리 중인 요청 수)
+_REQ_MS = deque(maxlen=200)
+_INFLIGHT = {"now": 0, "max": 0}
+_INFLIGHT_LOCK = threading.Lock()
+SLOW_LOG_MS = int(os.environ.get("WITHU_SLOW_LOG_MS", 2000))   # 이보다 오래 걸린 요청은 로그에 한 줄
+
+
+def _pct(xs, q):
+    xs = sorted(xs)
+    return xs[min(len(xs) - 1, int(q * len(xs)))] if xs else None
+
+
 def _ts_or(v, default):
     from .bystander import _ts
     return _ts(v, default)
@@ -147,11 +161,38 @@ def health():
         out["bystander_llm_warm_calls"] = _llm.STATUS.get("warm", 0)
         if _llm.STATUS["error"]:
             out["bystander_llm_error"] = _llm.STATUS["error"]
+    # v0.3.11: 응답 시간과 모델 추론 시간
+    xs = list(_REQ_MS)
+    if xs:
+        out["analyze_ms"] = {"n": len(xs), "p50": _pct(xs, 0.5), "p95": _pct(xs, 0.95), "max": max(xs)}
+    out["analyze_inflight"] = dict(_INFLIGHT)
+    st = models.INFER_STATS
+    if st["calls"]:
+        out["inference"] = {"calls": st["calls"], "avg_ms": int(st["busy_ms"] / st["calls"]),
+                            "last_ms": st["last_ms"], "queue_wait_ms_max": st["wait_ms_max"],
+                            "lock": models.INFER_LOCK is not None}
     return out
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
 def analyze(req: AnalyzeRequest):
+    t0 = time.time()
+    with _INFLIGHT_LOCK:
+        _INFLIGHT["now"] += 1
+        _INFLIGHT["max"] = max(_INFLIGHT["max"], _INFLIGHT["now"])
+    try:
+        return _analyze(req, t0)
+    finally:
+        ms = int((time.time() - t0) * 1000)
+        _REQ_MS.append(ms)
+        with _INFLIGHT_LOCK:
+            _INFLIGHT["now"] -= 1
+        if ms >= SLOW_LOG_MS:
+            print(f"[analyze] slow {ms}ms room={req.room_id} msg={req.new_message.message_id} "
+                  f"track={req.track_bystander} inflight={_INFLIGHT['now']}", flush=True)
+
+
+def _analyze(req: AnalyzeRequest, t0: float):
     set_request_context(req)
     body = req.model_dump()
     # v0.3.9: 전송 전 호출이면 LLM 판정을 모델 추론보다 먼저 출발시킨다 (모델이 도는 동안 LLM도 함께 돈다)
