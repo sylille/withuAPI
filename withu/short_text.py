@@ -4,11 +4,15 @@
 모듈 A에서 0.50 언저리 점수를 받았다. 모델이 '모르겠다'는 뜻인데, 공격 기준이 '0.50 이상'이라 공격으로 세어졌다.
 이 가짜 공격이 쌓이면서 가해자·피해자가 뒤바뀌고, 실제 거친 말('입 ㄷㅊ', 'ㅗㅗ')이 사건에서 빠졌다.
 
+v0.3.13: 실서버 모듈 A로 짧은 글자 60개를 재 보니(check_short_scores.py, 2026-11-16) 거의 모두 0.36~0.51이었다.
+'꺼져' 0.49, '닥쳐' 0.49, '바보' 0.49 — 짧은 욕설도 0.50 아래라 공격으로 세지 못하고 있었다.
+모델이 짧은 글자는 구별하지 못하므로, 짧은 메시지는 낱말 목록이 판단한다.
+
 규칙 (짧은 메시지에만 적용, 긴 메시지는 손대지 않는다):
-  1. 욕설·비하 표현이 있으면 낮추지 않는다. 짧은 초성 욕설(ㄲㅈ, ㄷㅊ, ㅅㅂ, ㅗ 등)은 모델이 놓쳐도 JAMO_FLOOR까지 올린다.
+  1. 분명한 욕설·비하(꺼져, 닥쳐, 바보, ㄲㅈ, ㄷㅊ, ㅅㅂ, ㅗ ...)는 모델 점수가 낮아도 FLOOR(0.70)까지 올린다.
+     뜻이 갈리는 말(미친, 짜증, 싫어, ㅈㄴ, ㅁㅊ)도 2인칭("너", "니가")과 함께 쓰면 분명한 것으로 본다 ("너 싫어").
   2. 맞장구·인사·되묻기("ㅇㅇ", "응", "왜", "ㅋㅋ", "?")와 똑같은 말이면 SHORT_CAP으로 내린다.
-  3. 그 밖의 짧은 말은 점수가 0.50 ~ SHORT_UNSURE_HI 사이(모델이 확신 없음)일 때만 SHORT_CAP으로 내린다.
-     모델이 확신하는 짧은 공격("너 싫어" 0.9)은 그대로 둔다.
+  3. 그 밖의 짧은 말(뜻이 갈리는 말 포함)은 점수가 0.50 ~ SHORT_UNSURE_HI(0.80) 사이일 때 SHORT_CAP으로 내린다.
 
 공개된 '짧은 채팅 표현' 표준 사전은 없어서, 아래 목록은 초등학생 단톡방에서 흔한 표현으로 직접 만든 것이다.
 목록을 늘릴 때는 FILLERS / HOSTILE_* 에 더하고 test_short_text.py에 한 줄씩 넣는다.
@@ -31,23 +35,26 @@ def _env(name, default, cast=float):
 
 ENABLE          = os.environ.get("WITHU_SHORT_GUARD", "1") != "0"
 SHORT_MAX_SYL   = _env("WITHU_SHORT_MAX_SYL", 5, int)    # 글자(음절·영문) 수가 이 이하면 '짧은 메시지'
-SHORT_UNSURE_HI = _env("WITHU_SHORT_UNSURE_HI", 0.65)    # 짧은 말에서 이 점수 미만이면 모델이 확신 없는 것으로 본다
+SHORT_UNSURE_HI = _env("WITHU_SHORT_UNSURE_HI", 0.80)    # 짧은 말에서 이 점수 미만이면 모델이 확신 없는 것으로 본다 (0.3.13: 0.65 -> 0.80, '안양하세요' 0.68)
 SHORT_CAP       = _env("WITHU_SHORT_CAP", 0.30)          # 내릴 때의 점수 (TOX_THRESHOLD 미만)
-JAMO_FLOOR      = _env("WITHU_JAMO_FLOOR", 0.70)         # 짧은 초성 욕설의 최소 점수. 전송 전 경고(0.75)보다 낮게 둔다
+JAMO_FLOOR      = _env("WITHU_JAMO_FLOOR", 0.70)         # 짧은 욕설(초성·낱말)의 최소 점수. 전송 전 경고(0.75)보다 낮게 둔다
 ENABLE_FLOOR    = os.environ.get("WITHU_JAMO_FLOOR_ON", "1") != "0"
 
 # --- 욕설·비하 -------------------------------------------------------------------------------------
-# 초성 욕설 (분명한 것만): 짧은 메시지에서 모델이 놓치면 JAMO_FLOOR까지 올린다.
+# strong: 분명한 욕설·비하. 짧은 메시지에서 모델이 놓쳐도 FLOOR까지 올린다.
 HOSTILE_JAMO_STRONG = ("ㅅㅂ", "ㅆㅂ", "ㅂㅅ", "ㅄ", "ㄲㅈ", "ㄷㅊ", "ㅈㄹ", "ㅈㄲ", "ㅅㄲ", "ㄴㄱㅁ", "ㄴㅇㅁ", "ㄷㅈ")
-# 뜻이 갈리는 초성 ('ㅁㅊ' = 미쳤다(감탄)일 때도, 'ㅈㄴ' = 강조): 낮추지만 않는다.
-HOSTILE_JAMO_WEAK = ("ㅁㅊ", "ㅈㄴ", "ㅉㅉ", "ㅂㄷ")
-# 낱말 (일부만 있어도). 낮추지 않는 용도라 넓게 잡는다.
-HOSTILE_WORDS = (
+HOSTILE_WORDS_STRONG = (
     "시발", "씨발", "시바", "씨바", "병신", "븅신", "빙신", "새끼", "색기", "지랄", "꺼져", "꺼지", "꺼저", "닥쳐", "닥치",
-    "입닥", "죽어", "죽을", "죽인", "뒤져", "뒤질", "디져", "존나", "졸라", "개새", "개같", "개빡", "애미", "느금", "좆", "엿",
-    "역겨", "역겁", "찐따", "냄새", "돼지", "못생", "쓰레기", "나가", "빠져", "한심", "멍청", "등신", "바보", "또라이",
-    "미친", "미쳤", "노답", "극혐", "혐오", "관종", "짜져", "재수없", "꼴보기", "짜증", "싫", "저리가", "왕따",
+    "입닥", "죽어", "죽을래", "뒤져", "뒤질", "디져", "개새", "개같", "애미", "느금", "좆", "엿먹", "역겨", "역겁",
+    "찐따", "냄새나", "돼지", "못생", "쓰레기", "멍청", "등신", "바보", "또라이", "짜져", "재수없", "꼴보기", "극혐",
+    "저리가", "나가라", "빠져", "왕따",
 )
+# weak: 뜻이 갈리는 말 ('ㅁㅊ'·'미쳤다' = 감탄, 'ㅈㄴ'·'존나' = 강조, '싫어' = 항의일 때도). 2인칭과 함께면 strong.
+HOSTILE_JAMO_WEAK = ("ㅁㅊ", "ㅈㄴ", "ㅉㅉ", "ㅂㄷ")
+HOSTILE_WORDS_WEAK = ("존나", "졸라", "미친", "미쳤", "짜증", "싫", "혐오", "노답", "관종", "한심", "나가", "개빡",
+                      "죽을", "죽인", "엿")
+_YOU = re.compile(r"(?<![가-힣])(?:너|넌|너는|너가|니가|니|느그|늬|너네|니네)(?![가-힣])")
+HOSTILE_WORDS = HOSTILE_WORDS_STRONG + HOSTILE_WORDS_WEAK      # 0.3.12와 같은 이름 (다른 곳에서 쓸 때)
 _ONLY_FINGER = re.compile(r"ㅗ+")                         # 'ㅗ', 'ㅗㅗ' (가운뎃손가락). 'ㅗㅜㅑ'(감탄)는 아님
 
 # --- 맞장구·인사·되묻기 (같은 글자 반복은 하나로 줄여 비교: 'ㅇㅇㅇ' -> 'ㅇ', '응응' -> '응') -----------------
@@ -102,10 +109,11 @@ def hostile(text: str) -> str:
     t = _norm(text)
     compact = t.replace(" ", "")
     runs = _JAMO_RUN.findall(t)
-    if any(_ONLY_FINGER.fullmatch(r) for r in runs) or any(j in compact for j in HOSTILE_JAMO_STRONG):
+    if any(_ONLY_FINGER.fullmatch(r) for r in runs) or any(j in compact for j in HOSTILE_JAMO_STRONG) \
+            or any(w in compact for w in HOSTILE_WORDS_STRONG):
         return "strong"
-    if any(j in compact for j in HOSTILE_JAMO_WEAK) or any(w in compact for w in HOSTILE_WORDS):
-        return "weak"
+    if any(j in compact for j in HOSTILE_JAMO_WEAK) or any(w in compact for w in HOSTILE_WORDS_WEAK):
+        return "strong" if _YOU.search(t) else "weak"
     return ""
 
 
@@ -118,19 +126,19 @@ def is_filler(text: str) -> bool:
 
 
 def short_guard(text: str, score: float):
-    """(점수, 사유) — 사유: 'short_filler' | 'short_unsure' | 'jamo_profanity' | None (그대로)."""
+    """(점수, 사유) — 사유: 'short_filler' | 'short_unsure' | 'short_profanity' | None (그대로)."""
     if not ENABLE or not (text or "").strip():
         return score, None
     if syllables(text) > SHORT_MAX_SYL:
         return score, None
     h = hostile(text)
-    if h:
-        if h == "strong" and ENABLE_FLOOR and score < JAMO_FLOOR:
-            return JAMO_FLOOR, "jamo_profanity"
+    if h == "strong":
+        if ENABLE_FLOOR and score < JAMO_FLOOR:
+            return JAMO_FLOOR, "short_profanity"
         return score, None
     if score < TOX_THRESHOLD:
         return score, None
-    if is_filler(text):
+    if not h and is_filler(text):
         return min(score, SHORT_CAP), "short_filler"
     if score < SHORT_UNSURE_HI:
         return min(score, SHORT_CAP), "short_unsure"
