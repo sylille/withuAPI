@@ -15,6 +15,7 @@ from typing import Callable, List, Optional, Dict
 from .check_chat_excel import prosocial_guard, TOX_THRESHOLD
 from .target_resolver import evaluate_window_v2 as evaluate_window
 from .target_resolver import message_flags, RESIST_CAP, PSEUDO_CB
+from .short_text import short_guard
 
 # v0.3.3 -----------------------------------------------------------------------------------------
 # 점수 합치는 방법. "gated"(기본): cb_score는 '이 메시지'의 점수다. 맥락 점수(모듈 B)는 창 전체에 대한 값이라
@@ -64,9 +65,21 @@ class Ensemble:
         self.suspect = suspect
         self.confirm = confirm
 
-    def score_message(self, text) -> float:
-        """모듈 A. 본문이 없는 메시지(이미지 등)는 모델에 넘기지 않고 0점."""
+    def score_message_raw(self, text) -> float:
+        """모듈 A 모델 점수 그대로. 본문이 없는 메시지(이미지 등)는 모델에 넘기지 않고 0점."""
         return 0.0 if is_blank(text) else float(self.message_scorer(text))
+
+    def score_message(self, text) -> float:
+        """모듈 A + v0.3.12 짧은 글자 가드. 서버의 모든 메시지 점수(새 메시지, 창의 메시지, 방관 판정부)가 이걸 쓴다."""
+        return self.score_message_detail(text)[0]
+
+    def score_message_detail(self, text):
+        """(보정한 점수, 모델 점수, 사유). 사유는 short_text.short_guard 참고, 보정이 없으면 None."""
+        raw = self.score_message_raw(text)
+        if is_blank(text):
+            return raw, raw, None
+        adj, why = short_guard(text, raw)
+        return adj, raw, why
 
     def score_context(self, msgs: List[dict]) -> Optional[float]:
         """모듈 B. 메시지가 CTX_MIN_WINDOW개보다 적으면 None (판단 보류)."""
@@ -105,7 +118,7 @@ class Ensemble:
         is_def = bool(new.get("is_defense_action", False))              # NEW
         track = bool(req.get("track_bystander", True))
 
-        m_score = self.score_message(new_text)
+        m_score, m_raw, short_why = self.score_message_detail(new_text)
         c_score = self.score_context(ctx + [new])
         e_score = None
         if self.exclusion_scorer is not None and req.get("logs"):
@@ -116,6 +129,9 @@ class Ensemble:
         # NEW: prosocial guard on the new message → fixes the comfort-message FP (Bug 1)
         cb_score, suppressed, guard_reason = prosocial_guard(
             new_text, cb_score, is_defense_action=is_def)
+        # v0.3.12: 짧은 글자 가드로 내렸으면 그 사유를 남긴다 (올린 경우 jamo_profanity는 억제가 아니다)
+        if not suppressed and short_why in ("short_filler", "short_unsure"):
+            suppressed, guard_reason = True, "short_text"
         # NEW: per-message attribution over the window → 가해자/피해자 + targeting-aware verdict
         items = []
         for m in ctx + [new]:
@@ -161,7 +177,7 @@ class Ensemble:
             except Exception:
                 bystander = None
 
-        evidence = (f"msg={m_score:.2f} ctx=" + ("-" if c_score is None else f"{c_score:.2f}")
+        evidence = (f"msg={m_score:.2f}" + (f"({short_why} {m_raw:.2f})" if short_why else "") + " ctx=" + ("-" if c_score is None else f"{c_score:.2f}")
                     + (f" excl={e_score:.2f}" if e_score is not None else "")
                     + f" → cb={cb_score:.2f} [{level}]")
 
@@ -188,6 +204,7 @@ class Ensemble:
                 "suppressed": suppressed, "guard_reason": guard_reason,   # NEW
                 "bystander_behavior": bystander,
                 "module_scores": {"message": round(m_score, 4),
+                                  "message_raw": round(m_raw, 4),     # v0.3.12: 짧은 글자 가드 전 모델 점수
                                   "context": (round(c_score, 4) if c_score is not None else None),
                                   "exclusion": (round(e_score, 4) if e_score is not None else None)},
                 "evidence": evidence}

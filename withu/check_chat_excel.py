@@ -277,10 +277,14 @@ def detect_events(sheet: str, msgs: list[ParsedMsg],
                   module_b: Optional[Callable[[str], float]],
                   module_b_window: Optional[Callable[[str], float]] = None
                   ) -> tuple[list[Event], list[dict]]:
+    try:                                      # v0.3.12: 실서버와 같은 짧은 글자 가드 (여기서 불러와야 순환 import가 없다)
+        from .short_text import short_guard
+    except ImportError:                       # python check_chat_excel.py 로 바로 실행할 때
+        from short_text import short_guard
     scored = []
     for m in msgs:
         cb_raw = module_a(m.text)
-        cb, supp, reason = prosocial_guard(m.text, cb_raw)
+        cb, supp, reason = prosocial_guard(m.text, short_guard(m.text, cb_raw)[0])
         scored.append(dict(m=m, cb_raw=cb_raw, cb=cb, supp=supp, reason=reason,
                            dis=(module_b(m.text) if module_b else None)))
 
