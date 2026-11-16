@@ -129,7 +129,7 @@ class Ensemble:
         # NEW: prosocial guard on the new message → fixes the comfort-message FP (Bug 1)
         cb_score, suppressed, guard_reason = prosocial_guard(
             new_text, cb_score, is_defense_action=is_def)
-        # v0.3.12: 짧은 글자 가드로 내렸으면 그 사유를 남긴다 (올린 경우 jamo_profanity는 억제가 아니다)
+        # v0.3.12: 짧은 글자 가드로 내렸으면 그 사유를 남긴다 (올린 경우 short_profanity는 억제가 아니다)
         if not suppressed and short_why in ("short_filler", "short_unsure"):
             suppressed, guard_reason = True, "short_text"
         # NEW: per-message attribution over the window → 가해자/피해자 + targeting-aware verdict
