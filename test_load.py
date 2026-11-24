@@ -12,6 +12,13 @@ v0.3.11 동시 접속 부하 확인 (2026-11-09 사전검사: 한 반이 동시�
 **검사 중인 반이 없을 때만 돌리세요.** 실서버에 부하를 주고, 가상의 방(load-...)에 사건을 엽니다.
 결과: 응답 시간 중앙값·95%·최대, 2초·28초를 넘긴 비율, 그리고 끝난 뒤 /health의 analyze_ms·inference.
 표준 라이브러리만 사용. 대사는 가상의 문장이다.
+
+v0.3.14: 앱팀 부하테스트(2026-11-23)와 같은 조건을 그대로 낼 수 있다.
+    python test_load.py --base http://127.0.0.1:8000 --key $WITHU_API_KEY --kids 27 --line-every 4.5 --events-per-min 400 --secs 120
+  --kids/--line-every: 아이 N명이 S초마다 한 줄 (요청은 줄마다 전송 전·후 2건) -> --rps 대신
+  --events-per-min:    /bystander/events(읽음) 분당 건수를 함께 보낸다
+  매초 /health를 불러 응답 시간을 재고, 10초 구간마다 '판정 완료된 줄'(전송 후 호출 성공)을 센다 -> 멈추는지 보인다.
+  503(서버가 마감을 넘겨 처리하지 않은 요청)은 따로 센다.
 """
 import argparse, json, statistics, threading, time, urllib.request
 from datetime import datetime, timezone
@@ -24,7 +31,12 @@ ap.add_argument("--rps", type=float, default=6.0, help="초당 요청 수 (전�
 ap.add_argument("--secs", type=float, default=60.0)
 ap.add_argument("--rooms", type=int, default=7, help="동시에 진행하는 방 수 (모둠 수)")
 ap.add_argument("--timeout", type=float, default=28.0, help="앱이 기다리는 시간과 같게")
+ap.add_argument("--kids", type=int, default=0, help="v0.3.14: 아이 수 (주면 --rps 대신 kids/line_every*2)")
+ap.add_argument("--line-every", type=float, default=4.5, help="v0.3.14: 아이 한 명이 한 줄을 보내는 간격(초)")
+ap.add_argument("--events-per-min", type=float, default=0, help="v0.3.14: /bystander/events(읽음) 분당 건수")
 args = ap.parse_args()
+if args.kids:
+    args.rps = 2 * args.kids / args.line_every
 RUN = str(int(time.time()))
 
 KIDS = [("P01", "태민"), ("P02", "건우"), ("P03", "현우"), ("P04", "서아")]
@@ -47,6 +59,7 @@ def call(path, body=None):
 class Room:
     def __init__(self, i):
         self.rid = f"load-{RUN}-{i}"
+        self.idx = i
         self.i = 0
         self.ctx = []
         self.lock = threading.Lock()
@@ -56,14 +69,16 @@ class Room:
             spk, text = LINES[self.i % len(LINES)]
             n = self.i
             self.i += 1
-        m = {"participant_code": spk, "text": text if n < len(LINES) else f"{text} {n}",
+        # v0.3.14: 방마다 다른 글이어야 한다. 예전에는 방 7개가 같은 글을 보내 서버 캐시에 걸려 추론을 7분의 1만 했다
+        m = {"participant_code": spk, "text": f"{text} {self.idx}{n}",
              "message_id": f"{self.rid}-m{n}",
              "timestamp": datetime.now(timezone.utc).isoformat(timespec="milliseconds")}
         return m
 
-    def body(self, m, track):
-        with self.lock:
-            ctx = list(self.ctx[-10:])
+    def body(self, m, track, ctx=None):
+        if ctx is None:
+            with self.lock:
+                ctx = list(self.ctx[-10:])
         return {"room_id": self.rid, "context": ctx, "new_message": m, "track_bystander": track,
                 "participants": [{"participant_code": c, "display_name": n} for c, n in KIDS]}
 
@@ -76,22 +91,59 @@ res = []            # (kind, ms or None, err)
 res_lock = threading.Lock()
 
 
-def one(room, m, track):
+done_at = []        # 전송 후 호출이 성공한 시각 (판정된 줄)
+health_ms = []      # (시각, ms 또는 None)
+ev_res = []         # 이벤트 응답 ms 또는 None
+n503 = [0]
+
+
+def one(room, m, track, ctx=None):
     t0 = time.time()
     try:
-        call("/analyze", room.body(m, track))
+        call("/analyze", room.body(m, track, ctx))
         r = ("post" if track else "pre", int((time.time() - t0) * 1000), None)
+        if track:
+            with res_lock:
+                done_at.append(time.time())
     except Exception as e:
+        if getattr(e, "code", None) == 503:
+            with res_lock:
+                n503[0] += 1
         r = ("post" if track else "pre", None, f"{type(e).__name__}: {e}"[:80])
     with res_lock:
         res.append(r)
 
 
+def event(room, k):
+    t0 = time.time()
+    try:
+        call("/bystander/events", {"room_id": room.rid, "participant_code": KIDS[k % len(KIDS)][0], "type": "read",
+                                   "message_id": f"{room.rid}-m{max(0, room.i - 1)}"})
+        ms = int((time.time() - t0) * 1000)
+    except Exception:
+        ms = None
+    with res_lock:
+        ev_res.append(ms)
+
+
+def health_probe(stop):
+    while not stop.is_set():
+        t0 = time.time()
+        try:
+            call("/health")
+            health_ms.append((t0, int((time.time() - t0) * 1000)))
+        except Exception:
+            health_ms.append((t0, None))
+        stop.wait(max(0.0, 1.0 - (time.time() - t0)))
+
+
 def message_flow(room):
     m = room.next_message()
-    one(room, m, False)
+    with room.lock:
+        ctx = list(room.ctx[-10:])               # v0.3.14: 전송 전·후 호출은 같은 문맥을 보낸다 (앱과 같게)
+    one(room, m, False, ctx)
     room.sent(m)
-    one(room, m, True)
+    one(room, m, True, ctx)
 
 
 print(f"health 전: {call('/health')}")
@@ -99,15 +151,27 @@ rooms = [Room(i) for i in range(args.rooms)]
 msgs_per_sec = args.rps / 2                      # 메시지 하나 = 요청 두 번
 n_msgs = int(args.secs * msgs_per_sec)
 print(f"방 {args.rooms}개, 메시지 {n_msgs}개 (요청 {2 * n_msgs}건, 초당 {args.rps:g}건), 대기 상한 {args.timeout:g}초")
-pool = ThreadPoolExecutor(max_workers=200)
+if args.events_per_min:
+    print(f"/bystander/events 분당 {args.events_per_min:g}건 함께")
+pool = ThreadPoolExecutor(max_workers=400)
+stop = threading.Event()
+hp = threading.Thread(target=health_probe, args=(stop,), daemon=True)
+hp.start()
 start = time.time()
-for k in range(n_msgs):
-    target = start + k / msgs_per_sec
-    d = target - time.time()
+sched = [(k / msgs_per_sec, "msg", k) for k in range(n_msgs)]
+if args.events_per_min:
+    eps = args.events_per_min / 60
+    sched += [(k / eps, "ev", k) for k in range(int(args.secs * eps))]
+for at, kind, k in sorted(sched):
+    d = start + at - time.time()
     if d > 0:
         time.sleep(d)
-    pool.submit(message_flow, rooms[k % len(rooms)])
+    if kind == "msg":
+        pool.submit(message_flow, rooms[k % len(rooms)])
+    else:
+        pool.submit(event, rooms[k % len(rooms)], k)
 pool.shutdown(wait=True)
+stop.set()
 
 ok = [ms for _, ms, e in res if ms is not None]
 errs = [e for _, ms, e in res if ms is None]
@@ -123,4 +187,19 @@ if ok:
             print(f"  {kind:4s}: 중앙값 {k[len(k) // 2]}ms, 95% {k[min(len(k) - 1, int(0.95 * len(k)))]}ms")
 if errs:
     print("실패 예:", errs[:3])
+if n503[0]:
+    print(f"503(서버 과부하로 처리 안 함) {n503[0]}건")
+print("\n10초 구간별: 판정된 줄 수 | /health 최대 ms")
+nb = int((max(done_at + [start]) - start) // 10) + 1
+nb = max(nb, int(args.secs // 10) + 1)
+for b in range(nb):
+    lo, hi = start + 10 * b, start + 10 * (b + 1)
+    n = sum(1 for t in done_at if lo <= t < hi)
+    hs = [ms for t, ms in health_ms if lo <= t < hi]
+    hmax = "응답없음" if any(h is None for h in hs) else (max(hs) if hs else "-")
+    print(f"  {10 * b:4d}~{10 * (b + 1):4d}s: {n:4d}줄 | health {hmax}")
+if ev_res:
+    ok_ev = sorted(x for x in ev_res if x is not None)
+    print(f"/bystander/events {len(ev_res)}건, 실패 {len(ev_res) - len(ok_ev)}, "
+          f"중앙값 {ok_ev[len(ok_ev) // 2] if ok_ev else '-'}ms, 최대 {ok_ev[-1] if ok_ev else '-'}ms")
 print(f"\nhealth 후: {json.dumps(call('/health'), ensure_ascii=False)}")

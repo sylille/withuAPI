@@ -145,9 +145,18 @@ check("방의 첫 메시지 '하지 말라고' -> 비해당, 맥락 점수는 �
 r = one("[사진]", img=True)
 check("방의 첫 메시지 사진 -> 비해당, cb_score 0", r["cb_type"] == "비해당" and r["cb_score"] == 0.0, str(r["cb_score"]))
 long_ctx = [{"participant_code": f"P{i%3+1}", "text": f"말 {i}", "message_id": f"c{i}"} for i in range(8)]
+import withu.ensemble as _E
+_E.CTX_LAZY = False                    # 예전 방식(늘 계산): 맥락 점수가 보이지만 cb_score에는 들어가지 않는다
 r = one("지금 너무 늦어서", ctx=long_ctx, who="P3")
 check("맥락 0.998이어도 평범한 말('지금 너무 늦어서')은 비해당, cb_score는 메시지 점수 그대로",
       r["cb_type"] == "비해당" and r["cb_score"] == 0.05 and r["module_scores"]["context"] == 0.998, f"{r['cb_score']} {r['cb_type']}")
+_E.CTX_LAZY = True                     # v0.3.14 기본: 메시지가 0.5 미만이면 모듈 B를 돌리지 않는다 (결과는 같음)
+n0 = len(calls)
+r2 = one("지금 너무 늦어서", ctx=long_ctx, who="P3")
+check("v0.3.14: 메시지 0.5 미만이면 모듈 B 생략 -> 같은 판정, context null, evidence ctx=skip",
+      len(calls) == n0 and r2["cb_score"] == r["cb_score"] and r2["cb_type"] == r["cb_type"]
+      and r2["attribution"] == r["attribution"] and r2["module_scores"]["context"] is None and "ctx=skip" in r2["evidence"],
+      f"calls {len(calls) - n0} {r2['module_scores']} {r2['evidence']}")
 r = one("너 진짜 짜증나", ctx=long_ctx)
 check("메시지 자체가 공격 쪽(0.60)이면 맥락이 점수를 올림 -> 언어적 폭력", r["cb_type"] == "언어적 폭력" and r["cb_score"] >= 0.75, str(r["cb_score"]))
 check("모듈 B에 최근 6개만, 발화자를 구분해서 넘김", len(calls[-1][0]) == 6 and calls[-1][1] and len(set(calls[-1][1])) > 1, str(calls[-1]))
