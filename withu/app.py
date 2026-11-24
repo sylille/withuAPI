@@ -16,8 +16,8 @@ import os
 import threading
 import time
 from collections import deque
-from functools import lru_cache
 
+import anyio
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -28,7 +28,7 @@ from .bystander_api import router as bystander_router, tracker
 from .target_resolver import set_request_context, set_exclusion_judge
 from . import models
 
-app = FastAPI(title="WithU Talk AI 추론 서버", version="0.3.13")
+app = FastAPI(title="WithU Talk AI 추론 서버", version="0.3.14")
 _llm = None            # phase4_bystander 모듈 (ENABLE_BYSTANDER=1일 때)
 app.include_router(bystander_router)
 _ensemble: Ensemble | None = None
@@ -61,7 +61,8 @@ def _load_classify_bystander():
 def build_ensemble() -> Ensemble:
     """Load real modules. Override pieces via env for staged rollout."""
     # cached so /analyze and the bystander window scoring don't run the model twice per message
-    message_scorer = lru_cache(maxsize=50_000)(models.load_message_scorer())
+    # (v0.3.14: 캐시는 models.CachedScorer가 한다. 묶음 추론과 한꺼번에 채점(many)을 쓰려고 lru_cache를 뺐다)
+    message_scorer = models.load_message_scorer()
     context_scorer = models.load_context_scorer()
 
     bystander_fn = None
@@ -107,6 +108,12 @@ _INFLIGHT = {"now": 0, "max": 0}
 _INFLIGHT_LOCK = threading.Lock()
 SLOW_LOG_MS = int(os.environ.get("WITHU_SLOW_LOG_MS", 2000))   # 이보다 오래 걸린 요청은 로그에 한 줄
 
+# v0.3.14: /analyze는 전용 스레드 묶음에서 돈다. 예전에는 /health·/bystander/*와 같은 스레드 40개를 나눠 써서,
+# 추론을 기다리는 /analyze가 40개를 다 차지하면 /health(5초 넘김)와 읽음 이벤트까지 줄을 섰다.
+ANALYZE_THREADS = int(os.environ.get("WITHU_ANALYZE_THREADS", 64))
+_analyze_limiter = None
+_SHED = {"n": 0, "last": None}             # 마감(WITHU_QUEUE_DEADLINE_SEC)을 넘겨 503으로 돌려준 요청
+
 
 def _pct(xs, q):
     xs = sorted(xs)
@@ -145,7 +152,7 @@ tracker.warm_hook = _maybe_warm
 
 
 @app.get("/health")
-def health():
+async def health():                        # v0.3.14: 이벤트 루프에서 바로 답한다 (스레드를 기다리지 않음)
     out = {"status": "ok", "version": app.version, "ensemble_ready": _ensemble is not None,
            "api_key_required": bool(API_KEY),
            "bystander_tracker": tracker._thread is not None and tracker._thread.is_alive()}
@@ -170,19 +177,45 @@ def health():
     if st["calls"]:
         out["inference"] = {"calls": st["calls"], "avg_ms": int(st["busy_ms"] / st["calls"]),
                             "last_ms": st["last_ms"], "queue_wait_ms_max": st["wait_ms_max"],
-                            "lock": models.INFER_LOCK is not None}
+                            "lock": models.INFER_LOCK is not None,
+                            # v0.3.14: 묶음 추론. items/calls = 한 번에 돌린 평균 개수, queue = 지금 기다리는 추론 수
+                            "batch": models.BATCH, "items": st["items"],
+                            "avg_batch": round(st["items"] / st["calls"], 2),
+                            "ms_per_item": round(st["busy_ms"] / max(1, st["items"]), 1),
+                            "queue": models.WORKER.depth(), "queue_max": st["queue_max"],
+                            "quant": models.QUANT or None}
+    out["overloaded_503"] = dict(_SHED)
     return out
 
 
 @app.post("/analyze", response_model=AnalyzeResponse)
-def analyze(req: AnalyzeRequest):
-    t0 = time.time()
+async def analyze(req: AnalyzeRequest):
+    global _analyze_limiter
+    t0 = time.time()                         # 도착 시각: 스레드를 기다린 시간도 마감에 넣는다
+    if _analyze_limiter is None:
+        _analyze_limiter = anyio.CapacityLimiter(ANALYZE_THREADS)
+    try:
+        return await anyio.to_thread.run_sync(_analyze_timed, req, t0, limiter=_analyze_limiter)
+    except models.Overloaded:
+        _SHED["n"] += 1
+        _SHED["last"] = time.strftime("%H:%M:%S")
+        print(f"[analyze] 503 overloaded room={req.room_id} msg={req.new_message.message_id} "
+              f"track={req.track_bystander} waited={int((time.time() - t0) * 1000)}ms", flush=True)
+        return JSONResponse(status_code=503, content={
+            "detail": "AI server overloaded: request waited longer than "
+                      f"{models.QUEUE_DEADLINE_SEC:g}s before inference and was not processed",
+            "overloaded": True})
+
+
+def _analyze_timed(req: AnalyzeRequest, t0: float):
+    models.set_deadline(t0 + models.QUEUE_DEADLINE_SEC if models.QUEUE_DEADLINE_SEC > 0 else None)
     with _INFLIGHT_LOCK:
         _INFLIGHT["now"] += 1
         _INFLIGHT["max"] = max(_INFLIGHT["max"], _INFLIGHT["now"])
     try:
         return _analyze(req, t0)
     finally:
+        models.set_deadline(None)            # 스레드는 다른 요청에 다시 쓰인다
         ms = int((time.time() - t0) * 1000)
         _REQ_MS.append(ms)
         with _INFLIGHT_LOCK:

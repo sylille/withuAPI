@@ -26,6 +26,9 @@ COMBINE_MODE   = os.environ.get("WITHU_COMBINE_MODE", "gated")
 CTX_MIN_WINDOW = int(os.environ.get("WITHU_CTX_MIN_WINDOW", 4))
 CTX_WINDOW     = int(os.environ.get("WITHU_CTX_WINDOW", 6))          # 모듈 B에 넘기는 최근 메시지 수
 CTX_SPEAKERS   = os.environ.get("WITHU_CTX_SPEAKERS", "1") != "0"    # 학습 때처럼 발화자를 A/B/C로 구분해 넘김
+# v0.3.14: "gated"에서는 메시지 점수가 0.5 미만이면 맥락 점수를 쓰지 않으므로 모듈 B를 돌리지 않는다 (cb_score는 그대로).
+#   이때 module_scores.context는 null, evidence는 "ctx=skip". WITHU_CTX_LAZY=0이면 예전처럼 늘 계산한다.
+CTX_LAZY       = os.environ.get("WITHU_CTX_LAZY", "1") != "0"
 IMAGE_TEXT     = "사진"                                               # 본문 없는 이미지를 모듈 B에 넘길 때 쓰는 말
 _IMAGE_ONLY    = re.compile(r"^\s*[\[(<]?\s*(?:사진|이미지|그림|photo|image)\s*[\])>]?\s*$", re.I)
 
@@ -118,8 +121,13 @@ class Ensemble:
         is_def = bool(new.get("is_defense_action", False))              # NEW
         track = bool(req.get("track_bystander", True))
 
+        # v0.3.14: 창의 메시지 중 점수가 없는 것을 한꺼번에 돌려 둔다 (하나씩 줄 서지 않게)
+        many = getattr(self.message_scorer, "many", None)
+        if many is not None:
+            many([m.get("text") for m in ctx + [new] if not is_blank(m.get("text"))])
         m_score, m_raw, short_why = self.score_message_detail(new_text)
-        c_score = self.score_context(ctx + [new])
+        ctx_skipped = CTX_LAZY and self.combine_mode == "gated" and m_score < TOX_THRESHOLD
+        c_score = None if ctx_skipped else self.score_context(ctx + [new])
         e_score = None
         if self.exclusion_scorer is not None and req.get("logs"):
             e_score = float(self.exclusion_scorer(req["logs"]))
@@ -177,7 +185,8 @@ class Ensemble:
             except Exception:
                 bystander = None
 
-        evidence = (f"msg={m_score:.2f}" + (f"({short_why} {m_raw:.2f})" if short_why else "") + " ctx=" + ("-" if c_score is None else f"{c_score:.2f}")
+        evidence = (f"msg={m_score:.2f}" + (f"({short_why} {m_raw:.2f})" if short_why else "")
+                    + " ctx=" + ("skip" if ctx_skipped else "-" if c_score is None else f"{c_score:.2f}")
                     + (f" excl={e_score:.2f}" if e_score is not None else "")
                     + f" → cb={cb_score:.2f} [{level}]")
 
