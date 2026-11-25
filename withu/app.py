@@ -2,7 +2,8 @@
 
 Run (ONE worker — the 방관 tracker keeps state in memory):
     cd ~/Downloads
-    uvicorn withu.app:app --host 0.0.0.0 --port 8000 --workers 1
+    uvicorn withu.app:app --host 0.0.0.0 --port 8000 --workers 1 --timeout-keep-alive 75
+    (keep-alive must outlive the app's idle-connection reuse; uvicorn's 5 s default caused resets)
 
 The WithU backend POSTs a message + recent context to /analyze and gets back a
 cyberbullying judgment. v0.3.0 adds the 방관행동 판정부:
@@ -28,7 +29,7 @@ from .bystander_api import router as bystander_router, tracker
 from .target_resolver import set_request_context, set_exclusion_judge
 from . import models
 
-app = FastAPI(title="WithU Talk AI 추론 서버", version="0.3.16")
+app = FastAPI(title="WithU Talk AI 추론 서버", version="0.3.17")
 _llm = None            # phase4_bystander 모듈 (ENABLE_BYSTANDER=1일 때)
 app.include_router(bystander_router)
 _ensemble: Ensemble | None = None

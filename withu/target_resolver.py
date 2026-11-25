@@ -160,6 +160,8 @@ SUBROOM_MIN_MEMBERS    = _env("WITHU_SUBROOM_MIN_MEMBERS", 3, int)              
 ENABLE_EXCLUSION_LLM   = os.environ.get("WITHU_EXCLUSION_LLM", "1") != "0"         # 배제 발화를 LLM으로 확인 (C1)
 # v0.3.16
 TOPIC_SPAN             = _env("WITHU_TOPIC_SPAN", 8, int)   # 이름 없는 뒷담화가 가리킨다고 볼 아이: 몇 메시지 안에 이름이 나왔나
+# v0.3.17
+PLURAL_SPAN            = _env("WITHU_PLURAL_SPAN", 8, int)  # "○○들·너네"가 가해자들을 부른다고 볼 때 거슬러 보는 메시지 수
 # v0.3.5
 PROTESTER_MAX_PRIOR    = _env("WITHU_PROTESTER_MAX_PRIOR", 1, int)   # 항의한 아이 보호: 그 전에 본인의 '공격'(점수 기준)이 이 수보다 적어야 함 (1 = 한 번도 없어야 함)
 REPEAT_RECENCY         = _env("WITHU_REPEAT_RECENCY", 15, int)                    # 반복 표적·2인칭 지목: 그 아이의 마지막 말이 이 안에 있어야 함 (0 = 끔)
@@ -692,9 +694,13 @@ def _attack_targets(items: list, i: int, roster, by_mid: dict) -> tuple:
     return pointed, near
 
 
-def _aimed_at(items: list, i: int, prior: set, roster, by_mid: dict) -> set:
+def _aimed_at(items: list, i: int, prior: set, roster, by_mid: dict, pointed: Optional[dict] = None) -> set:
     """i번째 메시지가 향한 '앞서 공격한 아이'들: 그 아이 이름, 그 아이 메시지에 단 답장,
-    또는 그 아이의 말 바로 뒤(3개 안)의 여럿을 부르는 말("너네", "○○들")."""
+    또는 여럿을 부르는 말("너네", "○○들")이면 바로 앞(3개 안)에서 말한 그 아이.
+    v0.3.17: 여럿을 부르는 말은 바로 앞 8개(PLURAL_SPAN) 안에서 말한 그 아이까지 본다. 다만 그 아이가 공격한
+    아이(pointed)가 그 아이의 마지막 말 뒤에 말했으면 뺀다 ("○○들"이 피해자 쪽을 부르는 말일 수 있어서).
+    (2026-11-25 사후검사2 실제 순서: 지민 "관종 같음" → 수아 → 예슬 → 민재 "그건 좀;;" → 예슬 "나쁜 새끼들".
+    바로 앞 3개에 지민이 없어 예슬이 공격자로 세어졌다.)"""
     d = items[i]
     who, text = d["speaker"], d.get("text") or ""
     aim = set(_named(text, roster, skip=(who,))) & prior
@@ -706,6 +712,12 @@ def _aimed_at(items: list, i: int, prior: set, roster, by_mid: dict) -> set:
     if _PLURAL_YOU.search(text) and not _PLURAL_THIRD.search(text) and not _THIRD_PERSON.search(text):
         k = _run_start(items, i)
         aim.update(o["speaker"] for o in items[max(0, k - REPEAT_REPLY_SPAN):k] if o["speaker"] in prior)
+        if pointed is not None and PLURAL_SPAN > REPEAT_REPLY_SPAN:
+            span = items[max(0, k - PLURAL_SPAN):k]
+            for a in {o["speaker"] for o in span} & prior - aim:
+                last = max(j for j, o in enumerate(span) if o["speaker"] == a)
+                if not any(o["speaker"] in pointed.get(a, ()) for o in span[last + 1:]):
+                    aim.add(a)
     return aim
 
 
@@ -717,7 +729,8 @@ def _counter_guard(out: list, roster) -> None:
     메시지 자체의 점수(cb_score·cb_type)는 여기서 바꾸지 않는다. 욕설이 섞인 말은 전송 전 경고도 그대로 뜬다.
     조건 (모두):
       1) 그 아이가 이 말 전에 공격으로 센 말이 없고, 가해자의 공격에 맞장구·무마한 적도 없다.
-      2) 이 말이 앞서 공격한 아이를 향한다: 그 아이 이름, 그 아이 메시지에 단 답장, 그 아이 말 바로 뒤의 "너네·○○들" (_aimed_at).
+      2) 이 말이 앞서 공격한 아이를 향한다: 그 아이 이름, 그 아이 메시지에 단 답장, 그 아이가 바로 앞(8개 안)에서 말한 뒤의
+         "너네·○○들" (_aimed_at. 그 사이 피해자가 말했으면 3개 안만).
       3) 그 아이의 공격은 이름·배제 표현·답장·'걔'로 다른 아이를 분명하게 가리켰고, 이 말을 한 아이를 향한 적은 없다.
          서로 욕하는 두 아이에게는 쓰지 않는다.
       4) 이 말에 가해자가 아닌 다른 아이의 이름, '걔·쟤', 웃음·맞장구가 없다.
@@ -743,7 +756,7 @@ def _counter_guard(out: list, roster) -> None:
         if cb >= TOX_THRESHOLD and prior and not counted[who] and who not in allies \
                 and not _LAUGH.search(text) and not _AGREE.search(text) \
                 and not _named(text, roster, skip=prior | {who}):
-            aim = _aimed_at(out, i, prior, roster, by_mid)
+            aim = _aimed_at(out, i, prior, roster, by_mid, pointed)
             if any(who not in pointed.get(a, set()) | near.get(a, set()) and pointed.get(a, set()) - {who} for a in aim):
                 d["cb_raw"], d["cb"], d["note"] = cb, min(cb, RESIST_CAP), "counter_aggressor"
                 continue
