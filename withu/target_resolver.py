@@ -158,6 +158,8 @@ ENABLE_SUBROOM         = os.environ.get("WITHU_ENABLE_SUBROOM", "1") != "0"     
 SUBROOM_MAX_MISSING    = _env("WITHU_SUBROOM_MAX_MISSING", 2, int)                 # 부분 방에서 빠진 아이 수의 상한
 SUBROOM_MIN_MEMBERS    = _env("WITHU_SUBROOM_MIN_MEMBERS", 3, int)                 # 부분 방의 최소 인원 (1:1 대화는 제외)
 ENABLE_EXCLUSION_LLM   = os.environ.get("WITHU_EXCLUSION_LLM", "1") != "0"         # 배제 발화를 LLM으로 확인 (C1)
+# v0.3.16
+TOPIC_SPAN             = _env("WITHU_TOPIC_SPAN", 8, int)   # 이름 없는 뒷담화가 가리킨다고 볼 아이: 몇 메시지 안에 이름이 나왔나
 # v0.3.5
 PROTESTER_MAX_PRIOR    = _env("WITHU_PROTESTER_MAX_PRIOR", 1, int)   # 항의한 아이 보호: 그 전에 본인의 '공격'(점수 기준)이 이 수보다 적어야 함 (1 = 한 번도 없어야 함)
 REPEAT_RECENCY         = _env("WITHU_REPEAT_RECENCY", 15, int)                    # 반복 표적·2인칭 지목: 그 아이의 마지막 말이 이 안에 있어야 함 (0 = 끔)
@@ -648,9 +650,29 @@ def _run_start(items: list, i: int) -> int:
     return k
 
 
+def _talked_about(items: list, i: int, roster, skip=()) -> set:
+    """v0.3.16: i번째 메시지 앞(TOPIC_SPAN 안)에서 마지막으로 이름이 나온 아이가 그 뒤로 한 번도 말하지 않았으면 그 아이.
+    대상 없이 남 얘기하듯 한 공격("맨날 저래서 짜증남", "말하면 또 삐질걸")은 바로 앞 화자가 아니라
+    방에서 이야기되던 아이를 향한 것으로 본다 (2026-11-25 사후검사2 재현: 지민의 공격이 도현 대신
+    바로 앞에서 "먼데"라고 한 예슬을 향한 것으로 잡혀 '가해자를 나무란 주변인' 가드가 걸리지 않았다).
+    마지막으로 이름이 나온 메시지에 그런 아이가 둘 이상이면 정하지 않는다."""
+    if not roster:
+        return set()
+    for j in range(i - 1, max(-1, i - 1 - TOPIC_SPAN), -1):
+        o = items[j]
+        names = _named(o.get("text"), roster, skip=(o["speaker"],) + tuple(skip))
+        if not names:
+            continue
+        spoke = {p["speaker"] for p in items[j:i + 1]}
+        cand = [c for c in names if c not in spoke]
+        return set(cand) if len(cand) == 1 else set()
+    return set()
+
+
 def _attack_targets(items: list, i: int, roster, by_mid: dict) -> tuple:
     """공격 메시지가 향한 아이들 -> (분명한 대상, 가까이 있던 아이).
     분명한 대상: 이름·배제 표현이 가리킨 아이, 답장 대상, '걔·쟤'면 '_other'(여기서 말하지 않는 아이).
+    v0.3.16: 그런 것이 없고 2인칭도 아니면, 방에서 이야기되던 아이 (_talked_about).
     가까이 있던 아이: 2인칭이거나 분명한 대상이 없을 때 바로 앞에서 말한 아이."""
     d = items[i]
     who, text = d["speaker"], d.get("text") or ""
@@ -662,6 +684,8 @@ def _attack_targets(items: list, i: int, roster, by_mid: dict) -> tuple:
         pointed.add(by_mid[rt]["speaker"])
     if _THIRD_PERSON.search(text):
         pointed.add("_other")
+    if not pointed and not _SECOND.search(text):
+        pointed.update(_talked_about(items, i, roster, skip=(who,)))   # v0.3.16 "맨날 저래서 짜증남" -> 이야기되던 아이
     k = _run_start(items, i)
     prev = items[k - 1]["speaker"] if k > 0 else None
     near = {prev} if prev and (_SECOND.search(text) or not pointed) else set()
