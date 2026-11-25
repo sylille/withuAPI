@@ -173,6 +173,8 @@ SKIP_THIRD_PERSON      = os.environ.get("WITHU_SKIP_THIRD_PERSON", "1") != "0"  
 # v0.3.6
 ENABLE_CLASSMATES      = os.environ.get("WITHU_ENABLE_CLASSMATES", "1") != "0"     # 방에 없는 같은 반 아이를 피해자 후보로
 ABSENT_MIN_MENTIONS    = _env("WITHU_ABSENT_MIN_MENTIONS", 2, int)                 # 방에 없는 아이: 이름이 나온 공격 수 (반응을 볼 수 없어서)
+# v0.3.15
+ENABLE_COUNTER_GUARD   = os.environ.get("WITHU_ENABLE_COUNTER_GUARD", "1") != "0"  # 가해자를 향한 주변인의 말은 공동 가해로 세지 않음
 
 # ----------------------------------------------------- per-request context ---
 _CTX: contextvars.ContextVar[dict] = contextvars.ContextVar("withu_target_ctx", default={})
@@ -633,6 +635,100 @@ def _butt_out(text: str, targets, items: list, i: int) -> bool:
     return _intervened(items, i, targets)
 
 
+# v0.3.15: 여럿을 부르는 말 ("나쁜 새끼들", "너네 진짜 왜 그래"). '그 새끼들', '걔네'처럼 남 얘기하는 말은 아니다.
+_PLURAL_YOU = re.compile(r"(?<![가-힣])(?:너네|니네|너희|느그|늬들)|(?:새끼|ㅅㄲ|놈|년)들")
+_PLURAL_THIRD = re.compile(r"(?<![가-힣])(?:그|저|이)\s*(?:새끼|ㅅㄲ|놈|년)들|(?<![가-힣])(?:걔|쟤|얘)네")
+
+
+def _run_start(items: list, i: int) -> int:
+    """i번째 메시지를 보낸 아이가 이어서 보낸 줄 묶음의 첫 위치."""
+    who, k = items[i]["speaker"], i
+    while k > 0 and items[k - 1]["speaker"] == who:
+        k -= 1
+    return k
+
+
+def _attack_targets(items: list, i: int, roster, by_mid: dict) -> tuple:
+    """공격 메시지가 향한 아이들 -> (분명한 대상, 가까이 있던 아이).
+    분명한 대상: 이름·배제 표현이 가리킨 아이, 답장 대상, '걔·쟤'면 '_other'(여기서 말하지 않는 아이).
+    가까이 있던 아이: 2인칭이거나 분명한 대상이 없을 때 바로 앞에서 말한 아이."""
+    d = items[i]
+    who, text = d["speaker"], d.get("text") or ""
+    pointed = set(_named(text, roster, skip=(who,)))
+    if _EXCLUDE.search(text):
+        pointed.update(_excl_target(text, roster, skip=(who,)))
+    rt = d.get("reply_to")
+    if rt and rt in by_mid and by_mid[rt]["speaker"] != who:
+        pointed.add(by_mid[rt]["speaker"])
+    if _THIRD_PERSON.search(text):
+        pointed.add("_other")
+    k = _run_start(items, i)
+    prev = items[k - 1]["speaker"] if k > 0 else None
+    near = {prev} if prev and (_SECOND.search(text) or not pointed) else set()
+    return pointed, near
+
+
+def _aimed_at(items: list, i: int, prior: set, roster, by_mid: dict) -> set:
+    """i번째 메시지가 향한 '앞서 공격한 아이'들: 그 아이 이름, 그 아이 메시지에 단 답장,
+    또는 그 아이의 말 바로 뒤(3개 안)의 여럿을 부르는 말("너네", "○○들")."""
+    d = items[i]
+    who, text = d["speaker"], d.get("text") or ""
+    aim = set(_named(text, roster, skip=(who,))) & prior
+    rt = d.get("reply_to")
+    if rt and rt in by_mid and by_mid[rt]["speaker"] in prior:
+        aim.add(by_mid[rt]["speaker"])
+    # 이름·답장 없는 "너"는 쓰지 않는다: 여럿이 말하는 방에서는 바로 앞 사람이 아니라 피해자를 부르는 경우가 많다
+    # (검증 코퍼스: "너 그렇게 자존감 채우면 만족해?", "너랑 나랑 몸무게 똑같은데"는 피해자를 향한 공격).
+    if _PLURAL_YOU.search(text) and not _PLURAL_THIRD.search(text) and not _THIRD_PERSON.search(text):
+        k = _run_start(items, i)
+        aim.update(o["speaker"] for o in items[max(0, k - REPEAT_REPLY_SPAN):k] if o["speaker"] in prior)
+    return aim
+
+
+def _counter_guard(out: list, roster) -> None:
+    """v0.3.15 가해자를 향한 주변인의 말 (2026-11-25 사후검사2 보고).
+    다른 아이를 공격하던 가해자에게 주변인이 되받아친 말("지민아 조용히 좀 해", "나쁜 새끼들")은 점수가 높아도
+    역할 판정에서 공격으로 세지 않는다. 예전에는 이 말 2개가 공격으로 세어져 말린 아이가 공동 가해자가 됐고
+    (attack_message_ids에 들어감), 앱이 그 아이를 가해자로 기록해 주변인 선택지가 사라졌다.
+    메시지 자체의 점수(cb_score·cb_type)는 여기서 바꾸지 않는다. 욕설이 섞인 말은 전송 전 경고도 그대로 뜬다.
+    조건 (모두):
+      1) 그 아이가 이 말 전에 공격으로 센 말이 없고, 가해자의 공격에 맞장구·무마한 적도 없다.
+      2) 이 말이 앞서 공격한 아이를 향한다: 그 아이 이름, 그 아이 메시지에 단 답장, 그 아이 말 바로 뒤의 "너네·○○들" (_aimed_at).
+      3) 그 아이의 공격은 이름·배제 표현·답장·'걔'로 다른 아이를 분명하게 가리켰고, 이 말을 한 아이를 향한 적은 없다.
+         서로 욕하는 두 아이에게는 쓰지 않는다.
+      4) 이 말에 가해자가 아닌 다른 아이의 이름, '걔·쟤', 웃음·맞장구가 없다.
+    한 번이라도 다른 아이를 공격한 아이는 그 뒤로 이 보호를 받지 않는다."""
+    if not out:
+        return
+    by_mid = {d["mid"]: d for d in out if d.get("mid")}
+    counted: Counter = Counter()
+    pointed: dict = {}                    # 가해자 -> 공격이 분명하게 가리킨 아이 (이름·배제·답장·'걔')
+    near: dict = {}                       # 가해자 -> 공격 바로 앞에서 말한 아이 (2인칭이거나 대상이 안 보일 때)
+    allies: set = set()
+    for i, d in enumerate(out):
+        who, text = d["speaker"], d.get("text") or ""
+        cb = float(d.get("cb") or 0.0)
+        excl = bool(roster) and d["st"] not in ("protest", "defend") and bool(_EXCLUDE.search(text)) \
+            and bool(_excl_target(text, roster, skip=(who,)))
+        if cb < TOX_THRESHOLD and not excl:
+            if (d["st"] in ("agree", "dismiss") or is_playful(text)) and any(
+                    counted[o["speaker"]] and o["speaker"] != who for o in out[max(0, i - REPEAT_REPLY_SPAN):i]):
+                allies.add(who)
+            continue
+        prior = {s for s, c in counted.items() if c and s != who}
+        if cb >= TOX_THRESHOLD and prior and not counted[who] and who not in allies \
+                and not _LAUGH.search(text) and not _AGREE.search(text) \
+                and not _named(text, roster, skip=prior | {who}):
+            aim = _aimed_at(out, i, prior, roster, by_mid)
+            if any(who not in pointed.get(a, set()) | near.get(a, set()) and pointed.get(a, set()) - {who} for a in aim):
+                d["cb_raw"], d["cb"], d["note"] = cb, min(cb, RESIST_CAP), "counter_aggressor"
+                continue
+        counted[who] += 1
+        p, nr = _attack_targets(out, i, roster, by_mid)
+        pointed.setdefault(who, set()).update(p)
+        near.setdefault(who, set()).update(nr)
+
+
 def prepare(items: list[dict], pseudo: bool = True, roster: Optional[dict] = None, *,
             room_id=None, ask_last: bool = False) -> list[dict]:
     """성격 표시 + 저항 가드 + 항의한 아이 보호 + (선택) 무마 발화·이미지·배제 발화를 공격으로 표시.
@@ -671,6 +767,8 @@ def prepare(items: list[dict], pseudo: bool = True, roster: Optional[dict] = Non
                     d["st"] = "protest"
                 else:
                     attacked[who] += 1
+    if ENABLE_COUNTER_GUARD and ENABLE_RESIST_GUARD:
+        _counter_guard(out, roster)
     if not (pseudo and ENABLE_PSEUDO):
         return out
 
@@ -1098,6 +1196,8 @@ def evaluate_window_v2(window: list[dict], module_b_window=None, *, room_id=None
     spoke = {it["speaker"] for it in hist}
     absent = {c for c in kinds if c not in spoke}       # 이 방에서 말한 아이는 명단에 없어도 방에 있는 아이다
     meta_by_mid = {it["mid"]: it for it in hist if it.get("mid")}
+    # v0.3.15: 새 메시지(창의 마지막)에 붙은 가드 표시. ensemble이 전송 전 경고를 정할 때 쓴다 (counter_aggressor)
+    new_note = _new_note(hist, window)
     r = None
     # v0.3.10: 창 판정이 '가까이서 말한 아이'(turn_adjacency)로만 피해자를 정했으면 바로 돌려주지 않고 아래 판정을 먼저 본다.
     # 창 판정은 이름을 참가자 코드로만 찾아서 표시 이름("이영희")을 못 본다. 공격이 창 안에 6개 이상 쌓이면 창 판정이
@@ -1109,7 +1209,7 @@ def evaluate_window_v2(window: list[dict], module_b_window=None, *, room_id=None
     if base["is_bullying"] and r is None:
         aggr = base["attr"].aggressors
         nprot = protest_counts(hist, aggr)
-        return {**base, "target_source": "window", "attack_mids": _attack_mids(guarded, aggr),
+        return {**base, "target_source": "window", "attack_mids": _attack_mids(guarded, aggr), "new_note": new_note,
                 "victim_support": _support(base["attr"].victim_reason, base["attr"].victim, nprot),
                 "victim_protests": nprot[base["attr"].victim]}
 
@@ -1126,11 +1226,23 @@ def evaluate_window_v2(window: list[dict], module_b_window=None, *, room_id=None
         in_room = room_id is None or victim not in absent and (victim in ROSTERS.members(room_id) or victim in spoke)
         return {**r, "target_source": "room_history" if len(hist) > len(window) else "window",
                 "attack_mids": _attack_mids(hist, r["attr"].aggressors),
-                "attack_notes": sorted(notes),
+                "attack_notes": sorted(notes), "new_note": new_note,
                 "victim_in_room": in_room,
                 "parent_room_id": ROSTERS.parent(room_id) if victim in absent and kinds[victim] == "subroom" else None}
     detail = [f"{r['attr'].victim_reason}:{r['drop_reason']}"] if r else []
-    return {**base, "target_source": "window", "drop_detail": detail}
+    return {**base, "target_source": "window", "drop_detail": detail, "new_note": new_note}
+
+
+def _new_note(hist: list[dict], window: list[dict]) -> Optional[str]:
+    """창의 마지막 메시지(새 메시지)가 방 기록에서 받은 가드 표시 (note). 못 찾으면 None."""
+    if not window or not hist:
+        return None
+    last = window[-1]
+    for it in reversed(hist[-len(window) - 1:]):
+        if (last.get("mid") and it.get("mid") == last["mid"]) or \
+                (not last.get("mid") and it["speaker"] == last["speaker"] and (it.get("text") or "") == (last.get("text") or "")):
+            return it.get("note")
+    return None
 
 
 def _window_part(prepared_hist: list[dict], window: list[dict]) -> Optional[list]:

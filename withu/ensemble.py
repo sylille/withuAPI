@@ -15,7 +15,7 @@ from typing import Callable, List, Optional, Dict
 from .check_chat_excel import prosocial_guard, TOX_THRESHOLD
 from .target_resolver import evaluate_window_v2 as evaluate_window
 from .target_resolver import message_flags, RESIST_CAP, PSEUDO_CB
-from .short_text import short_guard
+from .short_text import short_guard, hostile as short_hostile
 
 # v0.3.3 -----------------------------------------------------------------------------------------
 # 점수 합치는 방법. "gated"(기본): cb_score는 '이 메시지'의 점수다. 맥락 점수(모듈 B)는 창 전체에 대한 값이라
@@ -156,6 +156,11 @@ class Ensemble:
         flags = message_flags(new_text, new.get("participant_code"), req.get("room_id"), new.get("message_id"))
         if not suppressed and flags["stance"] in ("protest", "defend") and cb_score >= TOX_THRESHOLD:
             cb_score, suppressed, guard_reason = min(cb_score, RESIST_CAP), True, "resistance"
+        # v0.3.15: 다른 아이를 공격하던 가해자에게 주변인이 한 핀잔("지민아 조용히 좀 해")은 전송 전 경고를 띄우지 않는다.
+        # 욕설·비하가 섞인 말("나쁜 새끼들")은 상대가 가해자여도 경고를 그대로 띄운다 (역할 판정에서만 공격으로 세지 않음).
+        if not suppressed and verdict.get("new_note") == "counter_aggressor" and cb_score >= TOX_THRESHOLD \
+                and not short_hostile(new_text) and flags["stance"] != "hostile":
+            cb_score, suppressed, guard_reason = min(cb_score, RESIST_CAP), True, "counter_aggressor"
 
         types = []
         if not suppressed and cb_score >= self.suspect: types.append("언어적 폭력")
